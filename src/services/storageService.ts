@@ -12,7 +12,7 @@ export interface UploadedStoreImage {
   wasCompressed: boolean;
 }
 
-export const MAX_BANNER_IMAGE_BYTES = 10 * 1024 * 1024;
+export const MAX_BANNER_IMAGE_BYTES = 15 * 1024 * 1024;
 
 const PUBLIC_BUCKET_SEGMENT = `/storage/v1/object/public/${STORE_MEDIA_BUCKET}/`;
 
@@ -66,7 +66,7 @@ export async function uploadOriginalBannerImage(file: File): Promise<UploadedSto
 
   if (file.size > MAX_BANNER_IMAGE_BYTES) {
     throw new Error(
-      "A imagem do banner ultrapassa o limite de 10 MB. Escolha um arquivo menor para enviar.",
+      "A imagem do banner ultrapassa o limite de 15 MB. Escolha um arquivo menor para enviar.",
     );
   }
 
@@ -98,7 +98,7 @@ export async function uploadOriginalBannerImage(file: File): Promise<UploadedSto
       msg.includes("size")
     ) {
       throw new Error(
-        "A imagem excede o limite de tamanho do bucket no Supabase Storage. Reduza o arquivo ou ajuste o limite do bucket 'store-media' para 10 MB.",
+        "A imagem excede o limite de tamanho do bucket no Supabase Storage. Reduza o arquivo ou ajuste o limite do bucket 'store-media' para 15 MB.",
       );
     }
     throw new Error(`Falha ao enviar o banner para o Storage: ${uploadError.message}`);

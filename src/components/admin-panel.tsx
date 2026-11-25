@@ -30,7 +30,11 @@ import {
 } from "@/services/catalogOptionsService";
 import { analyzeProductWithAi, isAnalyzableImageUrl } from "@/services/aiProductService";
 import { getAuthState, signOutAdmin, subscribeAuthChanges } from "@/services/authService";
-import { deleteStoreImage, uploadStoreImage } from "@/services/storageService";
+import {
+  deleteStoreImage,
+  uploadOriginalBannerImage,
+  uploadStoreImage,
+} from "@/services/storageService";
 import {
   money,
   priceOf,
@@ -291,13 +295,10 @@ export function AdminPanel() {
     const sessionId = productModalSessionRef.current;
     setUploading(true);
     try {
-      const folder =
-        kind === "product"
-          ? "products"
-          : kind === "banner" || kind === "banner-mobile"
-            ? "banners"
-            : "profiles";
-      const result = await uploadStoreImage(file, folder);
+      const result =
+        kind === "banner" || kind === "banner-mobile"
+          ? await uploadOriginalBannerImage(file)
+          : await uploadStoreImage(file, kind === "product" ? "products" : "profiles");
       if (kind === "banner" || kind === "banner-mobile") {
         const sizeLabel =
           result.original >= 1024 * 1024
@@ -790,7 +791,7 @@ export function AdminPanel() {
                     id: crypto.randomUUID(),
                     image_url: "",
                     mobile_image_url: "",
-                    alt: "",
+                    alt: "Banner Use Camile Acessórios",
                     active: true,
                     filter: "",
                     display_order: data.banners.length,
@@ -806,9 +807,13 @@ export function AdminPanel() {
                 key={b.id}
                 className="grid grid-cols-[80px_minmax(0,1fr)] md:grid-cols-[120px_minmax(0,1fr)_auto] gap-5 py-5 border-b items-center"
               >
-                <img src={b.image_url} alt={b.alt} className="w-full h-20 object-cover" />
+                <img
+                  src={b.image_url}
+                  alt={b.alt || "Banner Use Camile Acessórios"}
+                  className="w-full h-20 object-cover"
+                />
                 <div>
-                  <p className="text-sm">{b.alt}</p>
+                  <p className="text-sm font-medium">Banner {i + 1}</p>
                   <p className="text-xs text-muted-foreground mt-2">
                     Ordem {i + 1} · {b.filter || "Sem filtro"}
                     {b.mobile_image_url?.trim() ? " · Com imagem mobile" : ""}
@@ -1520,7 +1525,7 @@ export function AdminPanel() {
                 {banner.image_url && (
                   <img
                     src={banner.image_url}
-                    alt={banner.alt}
+                    alt="Prévia do banner principal"
                     className="w-full h-36 object-contain bg-muted rounded"
                   />
                 )}
@@ -1568,7 +1573,7 @@ export function AdminPanel() {
                 {banner.mobile_image_url && (
                   <img
                     src={banner.mobile_image_url}
-                    alt={`${banner.alt || "Banner"} (mobile)`}
+                    alt="Prévia do banner para celular"
                     className="w-full h-36 object-contain bg-muted rounded"
                   />
                 )}
@@ -1590,13 +1595,6 @@ export function AdminPanel() {
                   />
                 </label>
               </div>
-              <label>
-                Texto alternativo
-                <input
-                  value={banner.alt}
-                  onChange={(e) => setBanner({ ...banner, alt: e.target.value })}
-                />
-              </label>
               <label>
                 Filtro de destino
                 <select
@@ -1623,13 +1621,16 @@ export function AdminPanel() {
                 className="w-full"
                 disabled={saving || uploading}
                 onClick={async () => {
-                  if (!banner.image_url.trim() || !banner.alt.trim()) {
-                    toast.error("Adicione a foto e o texto alternativo.");
+                  if (!banner.image_url.trim()) {
+                    toast.error("Adicione a foto principal do banner.");
                     return;
                   }
                   setSaving(true);
                   try {
-                    await saveBanner(banner);
+                    await saveBanner({
+                      ...banner,
+                      alt: banner.alt.trim() || "Banner Use Camile Acessórios",
+                    });
                     cleanupPendingUploads([banner.image_url, banner.mobile_image_url ?? ""]);
                     setBanner(null);
                     toast.success("Banner salvo!");

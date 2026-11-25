@@ -284,7 +284,7 @@ export function Storefront() {
                   {mobileUrl && <source media="(max-width: 767px)" srcSet={mobileUrl} />}
                   <img
                     src={b.image_url}
-                    alt={b.alt}
+                    alt={b.alt || "Banner Use Camile Acessórios"}
                     className={`w-full h-full object-cover ${
                       mobileUrl ? "object-center" : "object-[72%_center] md:object-center"
                     }`}

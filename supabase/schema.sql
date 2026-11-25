@@ -51,7 +51,7 @@ create table if not exists public.hero_banners (
   id uuid primary key default gen_random_uuid(),
   image_url text not null check (btrim(image_url) <> ''),
   mobile_image_url text,
-  alt text not null check (btrim(alt) <> ''),
+  alt text not null default 'Banner Use Camile Acessórios' check (btrim(alt) <> ''),
   active boolean not null default true,
   filter text not null default '',
   display_order integer not null default 0,
@@ -330,7 +330,7 @@ values (
   'store-media',
   'store-media',
   true,
-  10485760,
+  15728640,
   array['image/webp', 'image/jpeg', 'image/png', 'image/avif', 'image/gif']
 )
 on conflict (id) do nothing;

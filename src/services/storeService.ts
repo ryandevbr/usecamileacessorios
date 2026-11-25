@@ -16,6 +16,7 @@ import { deleteStoreImage } from "@/services/storageService";
 
 const KEY = "use-camile-store-v1";
 const STORE_EVENT = "camile-store";
+const DEFAULT_BANNER_ALT = "Banner Use Camile Acessórios";
 
 export type StoreScope = "public" | "admin";
 
@@ -110,7 +111,7 @@ function mapBannerRow(row: HeroBannerRow, fallbackIndex: number): Banner {
     id: row.id,
     image_url: row.image_url,
     mobile_image_url: row.mobile_image_url ?? "",
-    alt: row.alt,
+    alt: row.alt?.trim() || DEFAULT_BANNER_ALT,
     active: Boolean(row.active),
     filter: row.filter ?? "",
     display_order: row.display_order ?? fallbackIndex,
@@ -160,7 +161,7 @@ function toBannerPayload(banner: Banner, displayOrder: number) {
     id: banner.id || crypto.randomUUID(),
     image_url: banner.image_url.trim(),
     mobile_image_url: mobileUrl ? mobileUrl : null,
-    alt: banner.alt.trim(),
+    alt: banner.alt.trim() || DEFAULT_BANNER_ALT,
     active: Boolean(banner.active),
     filter: banner.filter.trim(),
     display_order: displayOrder,
@@ -669,7 +670,11 @@ export function useStore(options?: { scope?: StoreScope; enabled?: boolean }) {
         banner.display_order ?? (existingIndex >= 0 ? existingIndex : data.banners.length);
 
       if (!isSupabaseConfigured) {
-        const bannerWithOrder = { ...banner, display_order: displayOrder };
+        const bannerWithOrder: Banner = {
+          ...banner,
+          alt: banner.alt.trim() || DEFAULT_BANNER_ALT,
+          display_order: displayOrder,
+        };
         const next: StoreData = {
           ...data,
           banners: existing
