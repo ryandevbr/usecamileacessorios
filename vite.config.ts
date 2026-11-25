@@ -6,11 +6,13 @@ import viteReact from "@vitejs/plugin-react";
 import tsConfigPaths from "vite-tsconfig-paths";
 import { nitro } from "nitro/vite";
 
+const INITIAL_SHELL_ENV_KEYS = new Set(Object.keys(process.env));
+
 export default defineConfig(({ command, mode, isPreview }) => {
   if (command === "serve") {
     const serverEnv = loadEnv(mode, process.cwd(), "");
     for (const [key, value] of Object.entries(serverEnv)) {
-      if (!(key in process.env)) {
+      if (!INITIAL_SHELL_ENV_KEYS.has(key)) {
         process.env[key] = value;
       }
     }

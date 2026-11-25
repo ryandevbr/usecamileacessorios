@@ -14,6 +14,11 @@ export interface AiProductAnalysis {
   characteristics: AiProductCharacteristic[];
 }
 
+export interface AiProductMeta {
+  provider: "groq" | "gemini" | "openrouter";
+  model: string;
+}
+
 export interface AnalyzeProductParams {
   file?: File | null;
   imageUrl?: string;
@@ -23,9 +28,31 @@ export interface AnalyzeProductParams {
 
 interface AnalyzeApiResponse {
   data?: AiProductAnalysis;
+  meta?: AiProductMeta;
   error?: string;
   code?: string;
 }
+
+const KNOWN_FRIENDLY_CODES = new Set([
+  "UNAUTHORIZED",
+  "AI_NOT_CONFIGURED",
+  "AI_OVERLOADED",
+  "AI_AUTH_ERROR",
+  "AI_UNAVAILABLE",
+  "INVALID_BODY",
+  "INVALID_IMAGE",
+  "IMAGE_TOO_LARGE",
+  "INVALID_URL",
+  "IMAGE_FETCH_FAILED",
+  "MISSING_IMAGE",
+]);
+
+const OVERLOADED_MESSAGE =
+  "A IA está sobrecarregada no momento. Aguarde alguns segundos e toque novamente em 'Preencher detalhes com IA', ou preencha os campos manualmente.";
+const NOT_CONFIGURED_MESSAGE =
+  "Nenhum provedor de IA está configurado no servidor. Adicione ao menos uma chave (GROQ_API_KEY, GEMINI_API_KEY ou OPENROUTER_API_KEY) no arquivo .env local ou nas variáveis de ambiente da Vercel.";
+const GENERIC_ERROR_MESSAGE =
+  "Não foi possível analisar a peça com IA neste momento. Tente novamente em instantes ou preencha os campos manualmente.";
 
 function parseDataUrl(url: string): { base64: string; mimeType: string } | null {
   const match = /^data:([^;]+);base64,(.+)$/i.exec(url.trim());
@@ -102,20 +129,21 @@ export async function analyzeProductWithAi(
   const result = (await response.json().catch(() => ({}))) as AnalyzeApiResponse;
 
   if (!response.ok || !result.data) {
-    if (response.status === 429 || result.code === "RATE_LIMIT") {
-      throw new Error(
-        "Limite momentâneo da IA atingido. Aguarde alguns segundos e tente novamente.",
-      );
+    if (result.code === "AI_NOT_CONFIGURED") {
+      throw new Error(result.error || NOT_CONFIGURED_MESSAGE);
     }
-    if (result.code === "GEMINI_NOT_CONFIGURED") {
-      throw new Error(
-        result.error ??
-          "Configure a variável GEMINI_API_KEY no arquivo .env local ou nas variáveis de ambiente da Vercel.",
-      );
+    if (
+      response.status === 429 ||
+      response.status === 503 ||
+      response.status === 504 ||
+      result.code === "AI_OVERLOADED"
+    ) {
+      throw new Error(OVERLOADED_MESSAGE);
     }
-    throw new Error(
-      result.error ?? "Não foi possível analisar a peça com IA. Tente novamente em instantes.",
-    );
+    if (result.code && KNOWN_FRIENDLY_CODES.has(result.code) && result.error) {
+      throw new Error(result.error);
+    }
+    throw new Error(GENERIC_ERROR_MESSAGE);
   }
 
   return result.data;

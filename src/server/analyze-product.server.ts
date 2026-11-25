@@ -1,5 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 
+export type AiProviderName = "groq" | "gemini" | "openrouter";
+
 export interface AnalyzeProductRequestBody {
   imageBase64?: string;
   mimeType?: string;
@@ -21,8 +23,42 @@ export interface AnalyzedProductPayload {
   characteristics: AnalyzedProductCharacteristic[];
 }
 
-const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+export interface AnalyzeProductMeta {
+  provider: AiProviderName;
+  model: string;
+}
+
+interface ProviderAttempt {
+  provider: AiProviderName;
+  model: string;
+  apiKey: string;
+}
+
+interface AttemptFailure {
+  kind: "demand" | "auth" | "other";
+  reason: string;
+}
+
+const DEFAULT_PROVIDER_ORDER: AiProviderName[] = ["groq", "gemini", "openrouter"];
+const DEFAULT_GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct";
+const DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite";
+const DEFAULT_GEMINI_FALLBACK_MODELS = ["gemini-3.8-flash"];
+const DEFAULT_OPENROUTER_MODELS = ["openrouter/free"];
+
 const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
+const PER_ATTEMPT_TIMEOUT_MS = 4_500;
+const TOTAL_BUDGET_MS = 8_500;
+const MIN_REMAINING_MS = 500;
+
+const OVERLOADED_MESSAGE =
+  "A IA está sobrecarregada no momento. Aguarde alguns segundos e toque novamente em 'Preencher detalhes com IA', ou preencha os campos manualmente.";
+const NOT_CONFIGURED_MESSAGE =
+  "Nenhum provedor de IA está configurado no servidor. Adicione ao menos uma chave (GROQ_API_KEY, GEMINI_API_KEY ou OPENROUTER_API_KEY) no arquivo .env local ou nas variáveis de ambiente da Vercel.";
+const AUTH_ERROR_MESSAGE =
+  "As chaves de IA configuradas no servidor não foram aceitas pelo provedor. Verifique as credenciais no .env local ou na Vercel.";
+const GENERIC_AI_ERROR_MESSAGE =
+  "Não foi possível analisar a peça com IA neste momento. Tente novamente em instantes ou preencha os campos manualmente.";
+
 const ALLOWED_MIME_TYPES = new Set([
   "image/webp",
   "image/jpeg",
@@ -47,6 +83,69 @@ function jsonResponse(body: Record<string, unknown>, status = 200): Response {
 function normalizeMimeType(raw: string | undefined): string {
   const clean = (raw ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
   return clean === "image/jpg" ? "image/jpeg" : clean;
+}
+
+function parseCsvList(raw: string | undefined): string[] {
+  if (!raw) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const part of raw.split(",")) {
+    const clean = part.trim();
+    if (!clean || seen.has(clean)) continue;
+    seen.add(clean);
+    out.push(clean);
+  }
+  return out;
+}
+
+function parseProviderOrder(raw: string | undefined): AiProviderName[] {
+  const parsed = parseCsvList(raw)
+    .map((item) => item.toLowerCase())
+    .filter(
+      (item): item is AiProviderName =>
+        item === "groq" || item === "gemini" || item === "openrouter",
+    );
+  return parsed.length > 0 ? parsed : DEFAULT_PROVIDER_ORDER;
+}
+
+function buildProviderQueue(env: NodeJS.ProcessEnv): ProviderAttempt[] {
+  const order = parseProviderOrder(env["AI_PROVIDER_ORDER"]);
+  const queue: ProviderAttempt[] = [];
+
+  for (const provider of order) {
+    if (provider === "groq") {
+      const apiKey = (env["GROQ_API_KEY"] ?? "").trim();
+      if (!apiKey) continue;
+      const primary = (env["GROQ_MODEL"] ?? "").trim() || DEFAULT_GROQ_MODEL;
+      const fallbacks = parseCsvList(env["GROQ_FALLBACK_MODELS"]);
+      const models = parseCsvList([primary, ...fallbacks].join(","));
+      for (const model of models) {
+        queue.push({ provider: "groq", model, apiKey });
+      }
+    } else if (provider === "gemini") {
+      const apiKey = (env["GEMINI_API_KEY"] ?? "").trim();
+      if (!apiKey) continue;
+      const primary = (env["GEMINI_MODEL"] ?? "").trim() || DEFAULT_GEMINI_MODEL;
+      const fallbacks =
+        env["GEMINI_FALLBACK_MODELS"] !== undefined
+          ? parseCsvList(env["GEMINI_FALLBACK_MODELS"])
+          : DEFAULT_GEMINI_FALLBACK_MODELS;
+      const models = parseCsvList([primary, ...fallbacks].join(","));
+      for (const model of models) {
+        queue.push({ provider: "gemini", model, apiKey });
+      }
+    } else if (provider === "openrouter") {
+      const apiKey = (env["OPENROUTER_API_KEY"] ?? "").trim();
+      if (!apiKey) continue;
+      const configuredModels = parseCsvList(env["OPENROUTER_MODELS"]);
+      const models = configuredModels.length > 0 ? configuredModels : DEFAULT_OPENROUTER_MODELS;
+      for (const model of models) {
+        queue.push({ provider: "openrouter", model, apiKey });
+      }
+    }
+  }
+
+  return queue;
 }
 
 function isPrivateOrLocalHostname(hostname: string): boolean {
@@ -195,10 +294,12 @@ async function resolveImageData(
       );
     }
 
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3_500);
     let upstream: Response;
     try {
       upstream = await fetch(parsedUrl.toString(), {
-        signal: AbortSignal.timeout(15_000),
+        signal: controller.signal,
         headers: { accept: "image/*" },
       });
     } catch {
@@ -209,6 +310,8 @@ async function resolveImageData(
         },
         400,
       );
+    } finally {
+      clearTimeout(timer);
     }
 
     if (!upstream.ok) {
@@ -273,31 +376,36 @@ function sanitizeOptionList(input: unknown, fallback: string[]): string[] {
   return list.length > 0 ? list : fallback;
 }
 
-function matchAllowedOption(value: unknown, allowed: string[]): string {
-  if (typeof value !== "string") return "";
+function matchAllowedOptionWithFallback(value: unknown, allowed: string[]): string {
+  const fallback = allowed[0] ?? "";
+  if (typeof value !== "string") return fallback;
   const clean = value.trim();
-  if (!clean) return "";
+  if (!clean) return fallback;
   const exact = allowed.find(
     (option) => option.toLocaleLowerCase("pt-BR") === clean.toLocaleLowerCase("pt-BR"),
   );
-  return exact ?? "";
+  return exact ?? fallback;
 }
 
-function buildPrompt(categories: string[], materials: string[]): string {
+function buildSystemPrompt(categories: string[], materials: string[]): string {
   return [
     "Você é a especialista em curadoria e copywriting da loja brasileira de joias e acessórios femininos 'Use Camile Acessórios'.",
-    "Analise cuidadosamente a foto do acessório enviada e preencha os campos em português do Brasil (pt-BR) retornando exclusivamente JSON válido conforme o schema.",
+    "Analise cuidadosamente a foto do acessório e responda EXCLUSIVAMENTE com um objeto JSON válido em português do Brasil (pt-BR), sem markdown, sem comentários e sem texto extra.",
     "",
-    "Regras obrigatórias:",
-    "- name: nome comercial elegante, curto e atrativo em português (ex.: 'Brinco Argola Cravejada Zircônias'). Não inclua SKU, preço ou o nome da loja.",
-    `- category: escolha EXATAMENTE uma opção desta lista: ${categories.join(", ")}.`,
-    `- material: escolha EXATAMENTE uma opção desta lista: ${materials.join(", ")}. Orientação visual: peças douradas ou com banho de ouro tendem a ser 'Semijoia' e peças prateadas tendem a ser 'Prata 925', respeitando estritamente as opções disponíveis na lista.`,
-    "- description: escreva de 2 a 3 frases elegantes, femininas e persuasivas no tom delicado da Use Camile Acessórios, destacando estilo, brilho e versatilidade. NUNCA invente medidas em cm/mm, peso em gramas ou prazos de garantia.",
-    "- characteristics: liste de 3 a 5 características visíveis e úteis no formato { label, value } (ex.: Acabamento, Cor, Pedra, Fecho, Estilo, Ocasião). Descreva apenas o que é visível na foto e NUNCA invente tamanhos numéricos.",
+    "Schema JSON obrigatório:",
+    "{",
+    '  "name": "string — nome comercial elegante, curto e atrativo em português (ex.: Brinco Argola Cravejada Zircônias), sem SKU, preço ou nome da loja",',
+    `  "category": "string — EXATAMENTE uma opção de: ${categories.join(", ")}",`,
+    `  "material": "string — EXATAMENTE uma opção de: ${materials.join(", ")} (peças douradas/banhadas a ouro tendem a ser Semijoia e peças prateadas tendem a ser Prata 925, respeitando estritamente as opções disponíveis)",`,
+    '  "description": "string — 2 a 3 frases elegantes, femininas e persuasivas destacando estilo, brilho e versatilidade, SEM inventar medidas em cm/mm, peso ou garantia",',
+    '  "characteristics": [',
+    '    { "label": "string (ex.: Acabamento, Cor, Pedra, Fecho, Estilo, Ocasião)", "value": "string — apenas atributos visíveis, sem inventar tamanhos numéricos" }',
+    "  ] // de 3 a 5 itens",
+    "}",
   ].join("\n");
 }
 
-function buildResponseSchema(categories: string[], materials: string[]) {
+function buildGeminiResponseSchema(categories: string[], materials: string[]) {
   return {
     type: "OBJECT",
     properties: {
@@ -338,34 +446,256 @@ function buildResponseSchema(categories: string[], materials: string[]) {
   };
 }
 
+function extractJsonObject(rawText: string): Record<string, unknown> | null {
+  const trimmed = rawText.trim();
+  if (!trimmed) return null;
+
+  const candidates: string[] = [];
+  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed);
+  if (fenced?.[1]) {
+    candidates.push(fenced[1].trim());
+  }
+  candidates.push(trimmed);
+
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      if (parsed != null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // try next extraction candidate
+    }
+  }
+
+  return null;
+}
+
+export function parseAndNormalizeAiJson(
+  rawText: string,
+  availableCategories: string[],
+  availableMaterials: string[],
+): AnalyzedProductPayload | null {
+  const parsed = extractJsonObject(rawText);
+  if (!parsed) return null;
+
+  const name = typeof parsed["name"] === "string" ? parsed["name"].trim() : "";
+  const description = typeof parsed["description"] === "string" ? parsed["description"].trim() : "";
+  if (!name || !description) return null;
+
+  const rawCharacteristics = parsed["characteristics"];
+  const characteristics: AnalyzedProductCharacteristic[] = Array.isArray(rawCharacteristics)
+    ? rawCharacteristics
+        .filter(
+          (item): item is Record<string, unknown> =>
+            item != null && typeof item === "object" && !Array.isArray(item),
+        )
+        .map((item) => {
+          const rawLabel = item["label"] ?? item["attribute"] ?? item["name"];
+          const rawValue = item["value"];
+          return {
+            label: typeof rawLabel === "string" ? rawLabel.trim() : "",
+            value: typeof rawValue === "string" ? rawValue.trim() : "",
+          };
+        })
+        .filter((item) => item.label !== "" && item.value !== "")
+        .slice(0, 5)
+    : [];
+
+  return {
+    name,
+    category: matchAllowedOptionWithFallback(parsed["category"], availableCategories),
+    material: matchAllowedOptionWithFallback(parsed["material"], availableMaterials),
+    description,
+    characteristics,
+  };
+}
+
+interface OpenAiChatResponse {
+  choices?: Array<{
+    message?: {
+      content?: string | Array<{ type?: string; text?: string }>;
+    };
+  }>;
+  error?: { message?: string };
+}
+
 interface GeminiGenerateContentResponse {
   candidates?: Array<{
     content?: {
       parts?: Array<{ text?: string }>;
     };
-    finishReason?: string;
   }>;
-  error?: {
-    code?: number;
-    message?: string;
-    status?: string;
+  error?: { message?: string };
+}
+
+function classifyHttpFailure(status: number, providerMsg?: string): AttemptFailure {
+  const suffix = providerMsg ? ` (${providerMsg.slice(0, 140)})` : "";
+  if (status === 429 || status === 503 || status === 504 || status === 529) {
+    return { kind: "demand", reason: `HTTP ${status}${suffix}` };
+  }
+  if (status === 401 || status === 403) {
+    return { kind: "auth", reason: `HTTP ${status}${suffix}` };
+  }
+  return { kind: "other", reason: `HTTP ${status}${suffix}` };
+}
+
+async function callOpenAiCompatibleVision(params: {
+  endpoint: string;
+  attempt: ProviderAttempt;
+  image: { base64: string; mimeType: string };
+  categories: string[];
+  materials: string[];
+  signal: AbortSignal;
+  referer?: string;
+}): Promise<{ ok: true; text: string } | { ok: false; failure: AttemptFailure }> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    authorization: `Bearer ${params.attempt.apiKey}`,
   };
+  if (params.attempt.provider === "openrouter") {
+    if (params.referer) headers["http-referer"] = params.referer;
+    headers["x-title"] = "Use Camile Acessorios";
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(params.endpoint, {
+      method: "POST",
+      signal: params.signal,
+      headers,
+      body: JSON.stringify({
+        model: params.attempt.model,
+        temperature: 0.4,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: buildSystemPrompt(params.categories, params.materials) },
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "Analise esta peça de acessório e retorne apenas o JSON preenchido.",
+              },
+              {
+                type: "image_url",
+                image_url: {
+                  url: `data:${params.image.mimeType};base64,${params.image.base64}`,
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    });
+  } catch (err) {
+    const isAbort = err instanceof Error && err.name === "AbortError";
+    return {
+      ok: false,
+      failure: {
+        kind: isAbort ? "demand" : "other",
+        reason: isAbort ? "timeout" : err instanceof Error ? err.message : "network error",
+      },
+    };
+  }
+
+  const json = (await res.json().catch(() => ({}))) as OpenAiChatResponse;
+  if (!res.ok) {
+    return { ok: false, failure: classifyHttpFailure(res.status, json.error?.message) };
+  }
+
+  const content = json.choices?.[0]?.message?.content;
+  const text =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content.map((part) => (typeof part.text === "string" ? part.text : "")).join("")
+        : "";
+
+  if (!text.trim()) {
+    return { ok: false, failure: { kind: "other", reason: "resposta vazia" } };
+  }
+
+  return { ok: true, text };
+}
+
+async function callGeminiVision(params: {
+  attempt: ProviderAttempt;
+  image: { base64: string; mimeType: string };
+  categories: string[];
+  materials: string[];
+  signal: AbortSignal;
+}): Promise<{ ok: true; text: string } | { ok: false; failure: AttemptFailure }> {
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(params.attempt.model)}:generateContent?key=${encodeURIComponent(params.attempt.apiKey)}`;
+
+  let res: Response;
+  try {
+    res = await fetch(endpoint, {
+      method: "POST",
+      signal: params.signal,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { text: buildSystemPrompt(params.categories, params.materials) },
+              {
+                inline_data: {
+                  mime_type: params.image.mimeType,
+                  data: params.image.base64,
+                },
+              },
+            ],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: "application/json",
+          temperature: 0.4,
+          responseSchema: buildGeminiResponseSchema(params.categories, params.materials),
+        },
+      }),
+    });
+  } catch (err) {
+    const isAbort = err instanceof Error && err.name === "AbortError";
+    return {
+      ok: false,
+      failure: {
+        kind: isAbort ? "demand" : "other",
+        reason: isAbort ? "timeout" : err instanceof Error ? err.message : "network error",
+      },
+    };
+  }
+
+  const json = (await res.json().catch(() => ({}))) as GeminiGenerateContentResponse;
+  if (!res.ok) {
+    return { ok: false, failure: classifyHttpFailure(res.status, json.error?.message) };
+  }
+
+  const text = json.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("") ?? "";
+
+  if (!text.trim()) {
+    return { ok: false, failure: { kind: "other", reason: "resposta vazia" } };
+  }
+
+  return { ok: true, text };
 }
 
 export async function handleAnalyzeProductRequest(request: Request): Promise<Response> {
+  const startedAt = Date.now();
+
   const authError = await verifyAdminAuth(request);
   if (authError) return authError;
 
-  const apiKey = (process.env["GEMINI_API_KEY"] ?? "").trim();
-  if (!apiKey) {
-    return jsonResponse(
-      {
-        code: "GEMINI_NOT_CONFIGURED",
-        error:
-          "A chave GEMINI_API_KEY não está configurada no servidor. Adicione GEMINI_API_KEY no arquivo .env local ou nas variáveis de ambiente da Vercel.",
-      },
-      503,
-    );
+  const queue = buildProviderQueue(process.env);
+  if (queue.length === 0) {
+    return jsonResponse({ code: "AI_NOT_CONFIGURED", error: NOT_CONFIGURED_MESSAGE }, 503);
   }
 
   let body: AnalyzeProductRequestBody;
@@ -387,135 +717,96 @@ export async function handleAnalyzeProductRequest(request: Request): Promise<Res
     "Conjuntos",
   ]);
   const availableMaterials = sanitizeOptionList(body.availableMaterials, ["Prata 925", "Semijoia"]);
+  const referer = request.headers.get("origin") ?? request.headers.get("referer") ?? undefined;
 
-  const model = (process.env["GEMINI_MODEL"] ?? "").trim() || DEFAULT_GEMINI_MODEL;
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  let hadDemandFailure = false;
+  let allAuthFailures = true;
+  let attemptsRun = 0;
 
-  let geminiRes: Response;
-  try {
-    geminiRes = await fetch(endpoint, {
-      method: "POST",
-      signal: AbortSignal.timeout(30_000),
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        contents: [
-          {
-            role: "user",
-            parts: [
-              { text: buildPrompt(availableCategories, availableMaterials) },
-              {
-                inline_data: {
-                  mime_type: resolvedImage.mimeType,
-                  data: resolvedImage.base64,
-                },
-              },
-            ],
-          },
-        ],
-        generationConfig: {
-          responseMimeType: "application/json",
-          temperature: 0.4,
-          responseSchema: buildResponseSchema(availableCategories, availableMaterials),
-        },
-      }),
-    });
-  } catch {
-    return jsonResponse(
-      {
-        code: "GEMINI_NETWORK_ERROR",
-        error: "Não foi possível conectar à IA no momento. Tente novamente em instantes.",
-      },
-      502,
-    );
-  }
-
-  if (geminiRes.status === 429) {
-    return jsonResponse(
-      {
-        code: "RATE_LIMIT",
-        error: "Limite momentâneo da IA atingido. Aguarde alguns segundos e tente novamente.",
-      },
-      429,
-    );
-  }
-
-  const geminiJson = (await geminiRes.json().catch(() => ({}))) as GeminiGenerateContentResponse;
-
-  if (!geminiRes.ok) {
-    if (geminiRes.status === 401 || geminiRes.status === 403) {
-      return jsonResponse(
-        {
-          code: "GEMINI_AUTH_ERROR",
-          error: "Chave GEMINI_API_KEY inválida ou sem permissão no Google AI Studio.",
-        },
-        502,
+  for (const attempt of queue) {
+    const elapsed = Date.now() - startedAt;
+    const remaining = TOTAL_BUDGET_MS - elapsed;
+    if (remaining < MIN_REMAINING_MS) {
+      hadDemandFailure = true;
+      console.warn(
+        `[analyze-product] Tempo limite total atingido (${elapsed}ms); pulando ${attempt.provider}/${attempt.model}.`,
       );
+      break;
     }
-    return jsonResponse(
-      {
-        code: "GEMINI_API_ERROR",
-        error:
-          geminiJson.error?.message ??
-          "A IA não conseguiu analisar esta imagem agora. Tente novamente.",
-      },
-      502,
-    );
-  }
 
-  const rawText = geminiJson.candidates?.[0]?.content?.parts
-    ?.map((part) => part.text ?? "")
-    .join("")
-    .trim();
+    attemptsRun += 1;
+    const timeoutMs = Math.min(PER_ATTEMPT_TIMEOUT_MS, remaining);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  if (!rawText) {
-    return jsonResponse(
-      {
-        code: "EMPTY_RESPONSE",
-        error: "A IA não retornou detalhes para esta imagem. Tente outra foto mais nítida.",
-      },
-      502,
-    );
-  }
+    try {
+      const outcome =
+        attempt.provider === "groq"
+          ? await callOpenAiCompatibleVision({
+              endpoint: "https://api.groq.com/openai/v1/chat/completions",
+              attempt,
+              image: resolvedImage,
+              categories: availableCategories,
+              materials: availableMaterials,
+              signal: controller.signal,
+            })
+          : attempt.provider === "openrouter"
+            ? await callOpenAiCompatibleVision({
+                endpoint: "https://openrouter.ai/api/v1/chat/completions",
+                attempt,
+                image: resolvedImage,
+                categories: availableCategories,
+                materials: availableMaterials,
+                signal: controller.signal,
+                ...(referer ? { referer } : {}),
+              })
+            : await callGeminiVision({
+                attempt,
+                image: resolvedImage,
+                categories: availableCategories,
+                materials: availableMaterials,
+                signal: controller.signal,
+              });
 
-  let parsed: Record<string, unknown>;
-  try {
-    const candidate = JSON.parse(rawText) as unknown;
-    if (candidate == null || typeof candidate !== "object" || Array.isArray(candidate)) {
-      throw new Error("invalid");
+      if (!outcome.ok) {
+        if (outcome.failure.kind === "demand") hadDemandFailure = true;
+        if (outcome.failure.kind !== "auth") allAuthFailures = false;
+        console.warn(
+          `[analyze-product] Falha em ${attempt.provider}/${attempt.model}: ${outcome.failure.reason}`,
+        );
+        continue;
+      }
+
+      const normalized = parseAndNormalizeAiJson(
+        outcome.text,
+        availableCategories,
+        availableMaterials,
+      );
+      if (!normalized) {
+        allAuthFailures = false;
+        console.warn(
+          `[analyze-product] JSON inválido retornado por ${attempt.provider}/${attempt.model}; tentando próximo.`,
+        );
+        continue;
+      }
+
+      const meta: AnalyzeProductMeta = {
+        provider: attempt.provider,
+        model: attempt.model,
+      };
+      return jsonResponse({ data: normalized, meta }, 200);
+    } finally {
+      clearTimeout(timer);
     }
-    parsed = candidate as Record<string, unknown>;
-  } catch {
-    return jsonResponse(
-      {
-        code: "INVALID_AI_JSON",
-        error: "Não foi possível interpretar a resposta da IA. Tente novamente.",
-      },
-      502,
-    );
   }
 
-  const rawCharacteristics = parsed["characteristics"];
-  const characteristics: AnalyzedProductCharacteristic[] = Array.isArray(rawCharacteristics)
-    ? rawCharacteristics
-        .filter(
-          (item): item is { label?: unknown; value?: unknown } =>
-            item != null && typeof item === "object",
-        )
-        .map((item) => ({
-          label: typeof item.label === "string" ? item.label.trim() : "",
-          value: typeof item.value === "string" ? item.value.trim() : "",
-        }))
-        .filter((item) => item.label !== "" && item.value !== "")
-        .slice(0, 5)
-    : [];
+  if (attemptsRun > 0 && allAuthFailures) {
+    return jsonResponse({ code: "AI_AUTH_ERROR", error: AUTH_ERROR_MESSAGE }, 502);
+  }
 
-  const result: AnalyzedProductPayload = {
-    name: typeof parsed["name"] === "string" ? parsed["name"].trim() : "",
-    category: matchAllowedOption(parsed["category"], availableCategories),
-    material: matchAllowedOption(parsed["material"], availableMaterials),
-    description: typeof parsed["description"] === "string" ? parsed["description"].trim() : "",
-    characteristics,
-  };
+  if (hadDemandFailure) {
+    return jsonResponse({ code: "AI_OVERLOADED", error: OVERLOADED_MESSAGE }, 503);
+  }
 
-  return jsonResponse({ data: result }, 200);
+  return jsonResponse({ code: "AI_UNAVAILABLE", error: GENERIC_AI_ERROR_MESSAGE }, 502);
 }
