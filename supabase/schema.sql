@@ -27,8 +27,8 @@ create table if not exists public.products (
   id uuid primary key default gen_random_uuid(),
   name text not null check (btrim(name) <> ''),
   sku text not null default '',
-  category text not null check (btrim(category) <> ''),
-  material text not null check (btrim(material) <> ''),
+  category text not null,
+  material text not null,
   price numeric(10, 2) not null check (price > 0),
   sale_price numeric(10, 2) not null default 0 check (sale_price >= 0),
   is_on_sale boolean not null default false,
@@ -96,6 +96,14 @@ create table if not exists public.admin_profiles (
   updated_at timestamptz not null default now()
 );
 
+-- Opções dinâmicas do catálogo (categorias e materiais gerenciáveis pelo /admin)
+create table if not exists public.catalog_options (
+  id uuid primary key default gen_random_uuid(),
+  type text not null check (type in ('category', 'material')),
+  name text not null check (btrim(name) <> ''),
+  created_at timestamptz not null default now()
+);
+
 -- ----------------------------------------------------------------------------
 -- 3. Índices
 -- ----------------------------------------------------------------------------
@@ -123,6 +131,12 @@ create unique index if not exists idx_coupons_code_upper_unique
 create index if not exists idx_coupons_active
   on public.coupons (active)
   where active = true;
+
+create unique index if not exists idx_catalog_options_type_name_unique
+  on public.catalog_options (type, lower(btrim(name)));
+
+create index if not exists idx_catalog_options_type_created
+  on public.catalog_options (type, created_at asc);
 
 -- ----------------------------------------------------------------------------
 -- 4. Triggers de updated_at
@@ -153,7 +167,7 @@ create trigger trg_admin_profiles_updated_at
   for each row execute function public.set_updated_at();
 
 -- ----------------------------------------------------------------------------
--- 5. Registro inicial padrão de configurações / barra de avisos
+-- 5. Registros iniciais padrão (configurações + categorias/materiais)
 -- ----------------------------------------------------------------------------
 insert into public.store_settings (id, announcement_active, announcement_text, announcement_link)
 values (
@@ -164,18 +178,37 @@ values (
 )
 on conflict (id) do nothing;
 
+insert into public.catalog_options (type, name)
+values
+  ('category', 'Anéis'),
+  ('category', 'Colares'),
+  ('category', 'Brincos'),
+  ('category', 'Pulseiras'),
+  ('category', 'Tornozeleiras'),
+  ('category', 'Conjuntos'),
+  ('material', 'Prata 925'),
+  ('material', 'Semijoia')
+on conflict do nothing;
+
 -- ----------------------------------------------------------------------------
 -- 6. Permissões de schema e Row Level Security (RLS) nas tabelas
 -- ----------------------------------------------------------------------------
 grant usage on schema public to anon, authenticated;
 
-grant select on public.products, public.hero_banners, public.store_settings, public.coupons to anon;
+grant select on
+  public.products,
+  public.hero_banners,
+  public.store_settings,
+  public.coupons,
+  public.catalog_options
+to anon;
 grant select, insert, update, delete on
   public.products,
   public.hero_banners,
   public.store_settings,
   public.coupons,
-  public.admin_profiles
+  public.admin_profiles,
+  public.catalog_options
 to authenticated;
 
 alter table public.products enable row level security;
@@ -183,6 +216,7 @@ alter table public.hero_banners enable row level security;
 alter table public.store_settings enable row level security;
 alter table public.coupons enable row level security;
 alter table public.admin_profiles enable row level security;
+alter table public.catalog_options enable row level security;
 
 -- products
 drop policy if exists "Anon pode ler produtos ativos" on public.products;
@@ -256,6 +290,36 @@ create policy "Admin tem acesso total em perfis"
   to authenticated
   using (true)
   with check (true);
+
+-- catalog_options
+drop policy if exists "Publico pode ler opcoes do catalogo" on public.catalog_options;
+create policy "Publico pode ler opcoes do catalogo"
+  on public.catalog_options
+  for select
+  to anon, authenticated
+  using (true);
+
+drop policy if exists "Admin pode inserir opcoes do catalogo" on public.catalog_options;
+create policy "Admin pode inserir opcoes do catalogo"
+  on public.catalog_options
+  for insert
+  to authenticated
+  with check (true);
+
+drop policy if exists "Admin pode atualizar opcoes do catalogo" on public.catalog_options;
+create policy "Admin pode atualizar opcoes do catalogo"
+  on public.catalog_options
+  for update
+  to authenticated
+  using (true)
+  with check (true);
+
+drop policy if exists "Admin pode excluir opcoes do catalogo" on public.catalog_options;
+create policy "Admin pode excluir opcoes do catalogo"
+  on public.catalog_options
+  for delete
+  to authenticated
+  using (true);
 
 -- ----------------------------------------------------------------------------
 -- 7. Storage: bucket público store-media e políticas em storage.objects

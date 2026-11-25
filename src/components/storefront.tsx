@@ -23,22 +23,39 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { useStore } from "@/services/storeService";
+import {
+  mergeOptionValues,
+  optionLookupKey,
+  useCatalogOptions,
+} from "@/services/catalogOptionsService";
 import { calculateCoupon, normalizeCode, type CartItem } from "@/services/couponService";
 import { money, priceOf, type Product } from "@/data/catalog";
 import { storeContent } from "@/data/storeContent";
-const filters = [
-  "Todos",
-  "Promoções",
-  "Prata 925",
-  "Semijoias",
-  "Anéis",
-  "Colares",
-  "Brincos",
-  "Pulseiras",
-  "Conjuntos",
-];
+
+function matchesFilter(product: Product, selected: string): boolean {
+  if (selected === "Todos") return true;
+  if (selected === "Promoções") return product.is_on_sale;
+  const target = optionLookupKey(selected);
+  const productCategory = optionLookupKey(product.category);
+  const productMaterial = optionLookupKey(product.material);
+  if (target === "semijoias" && productMaterial === "semijoia") return true;
+  return productCategory === target || productMaterial === target;
+}
+
+function getMaterialBadgeClass(material: string): string {
+  const key = optionLookupKey(material);
+  if (key.includes("prata")) {
+    return "bg-background/95 text-foreground border border-border/80 backdrop-blur-sm";
+  }
+  if (key.includes("semijoia") || key.includes("ouro") || key.includes("dourad")) {
+    return "bg-secondary/95 text-foreground border border-primary/25 backdrop-blur-sm";
+  }
+  return "bg-background/95 text-foreground/90 border border-border/80 backdrop-blur-sm";
+}
+
 export function Storefront() {
   const { data, loading, error } = useStore({ scope: "public" });
+  const { categoryNames, materialNames } = useCatalogOptions();
   const [filter, setFilter] = useState("Todos");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState("featured");
@@ -95,16 +112,24 @@ export function Storefront() {
     });
     toast.success("Peça adicionada à sacola");
   }
-  const visible = data.products
+  const activeProducts = data.products.filter((p) => p.active);
+  const dynamicMaterials = mergeOptionValues(
+    materialNames,
+    activeProducts.map((p) => p.material),
+  );
+  const dynamicCategories = mergeOptionValues(
+    categoryNames,
+    activeProducts.map((p) => p.category),
+  );
+  const filters = [
+    "Todos",
+    "Promoções",
+    ...mergeOptionValues([...dynamicMaterials, ...dynamicCategories]),
+  ];
+  const visible = activeProducts
     .filter(
       (p) =>
-        p.active &&
-        (filter === "Todos" ||
-          (filter === "Promoções"
-            ? p.is_on_sale
-            : filter === "Semijoias"
-              ? p.material === "Semijoia"
-              : p.category === filter || p.material === filter)) &&
+        matchesFilter(p, filter) &&
         `${p.name} ${p.sku}`.toLowerCase().includes(query.toLowerCase()),
     )
     .sort((a, b) =>
@@ -121,7 +146,13 @@ export function Storefront() {
   const total = subtotal - discount;
   const count = cart.reduce((s, i) => s + i.quantity, 0);
   const scroll = (f: string) => {
-    setFilter(f);
+    const targetKey = optionLookupKey(f);
+    const matched =
+      filters.find((item) => optionLookupKey(item) === targetKey) ??
+      (targetKey === "semijoias"
+        ? filters.find((item) => optionLookupKey(item) === "semijoia")
+        : undefined);
+    setFilter(matched ?? f);
     document.getElementById("vitrine")?.scrollIntoView({ behavior: "smooth" });
   };
   async function share(p: Product) {
@@ -176,17 +207,25 @@ export function Storefront() {
         </div>
       )}
       <header className="sticky top-0 z-40 bg-background/95 backdrop-blur border-b border-border">
-        <div className="shell grid grid-cols-[minmax(0,1fr)_auto] md:grid-cols-[1fr_auto_1fr] items-center min-h-[88px]">
-          <a href="#inicio" aria-label="Use Camile — início">
-            <img src="/logo.png" alt="Use Camile Acessórios" className="brand-logo" />
+        <div className="shell flex items-center justify-between gap-3 md:grid md:grid-cols-[1fr_auto_1fr] h-[68px] sm:h-[74px] md:h-20">
+          <a
+            href="#inicio"
+            aria-label="Use Camile — início"
+            className="inline-flex items-center shrink-0"
+          >
+            <img
+              src="/logo.png"
+              alt="Use Camile Acessórios"
+              className="h-12 sm:h-14 md:h-16 w-auto max-w-none shrink-0 object-contain"
+            />
           </a>
-          <nav className="hidden md:flex gap-8 text-xs text-muted-foreground">
+          <nav className="hidden md:flex justify-center gap-8 text-xs text-muted-foreground">
             <a href="#inicio">Início</a>
             <a href="#vitrine">Vitrine</a>
             <a href="#envios-entregas">Envios e entregas</a>
             <a href="#sobre">Sobre</a>
           </nav>
-          <div className="flex gap-4 justify-end items-center">
+          <div className="flex gap-2 sm:gap-4 justify-end items-center shrink-0">
             <Button
               variant="ghost"
               size="icon"
@@ -370,7 +409,9 @@ export function Storefront() {
                       </span>
                     )}
                   </div>
-                  <span className="absolute bottom-3 left-3 text-[9px] bg-background/90 px-2 py-1 text-muted-foreground">
+                  <span
+                    className={`absolute bottom-3 left-3 max-w-[calc(100%-24px)] truncate rounded-sm px-2 py-1 text-[9px] font-medium tracking-wide shadow-xs ${getMaterialBadgeClass(p.material)}`}
+                  >
                     {p.material}
                   </span>
                 </div>
@@ -497,11 +538,15 @@ export function Storefront() {
           </a>
         </section>
       </main>
-      <footer className="bg-secondary/60 border-t py-10">
+      <footer className="bg-secondary/60 border-t pt-10 pb-24 md:pb-8">
         <div className="shell grid md:grid-cols-[1fr_1fr_1fr] gap-6 items-center">
           <div>
-            <img src="/logo.png" alt="Use Camile Acessórios" className="brand-logo" />
-            <p className="text-[11px] text-muted-foreground mt-2">Seu estilo merece esse brilho.</p>
+            <img
+              src="/logo.png"
+              alt="Use Camile Acessórios"
+              className="h-12 sm:h-14 w-auto object-contain"
+            />
+            <p className="text-[11px] text-muted-foreground mt-3">Seu estilo merece esse brilho.</p>
           </div>
           <div className="text-xs text-muted-foreground md:text-center leading-7">
             Loja 100% Online
@@ -531,14 +576,30 @@ export function Storefront() {
             </Button>
           </div>
         </div>
-        <div className="shell mt-8 pt-5 border-t flex justify-between text-[9px] text-muted-foreground">
-          <span>
-            © {new Date().getFullYear()} Use Camile Acessórios. Todos os direitos reservados.
-          </span>
-          <Link to="/login" className="flex gap-1 shrink-0">
-            <LockKeyhole size={11} />
-            Área restrita
-          </Link>
+        <div className="shell mt-8 pt-5 border-t">
+          <div className="grid grid-cols-1 md:grid-cols-3 items-center gap-3 text-center text-[11px] text-muted-foreground">
+            <p className="order-2 md:order-1 md:text-left md:justify-self-start">
+              Feito por{" "}
+              <a
+                href="https://instagram.com/ryan.devbr"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="transition-colors hover:text-[#C91E7C]"
+              >
+                @ryan.devbr
+              </a>
+            </p>
+            <p className="order-1 md:order-2 md:text-center md:justify-self-center">
+              © 2026 Use Camile Acessórios. Todos os direitos reservados.
+            </p>
+            <Link
+              to="/login"
+              className="order-3 inline-flex items-center justify-center gap-1.5 shrink-0 justify-self-center md:justify-self-end md:text-right md:pr-20 transition-colors hover:text-foreground"
+            >
+              <LockKeyhole size={12} />
+              Área restrita
+            </Link>
+          </div>
         </div>
       </footer>
       <Button className="floating-chat" asChild>
@@ -561,7 +622,14 @@ export function Storefront() {
                 className="w-full object-contain max-h-[55dvh] bg-muted"
               />
               <div className="p-6">
-                <p className="eyebrow text-primary mb-2">{product.material}</p>
+                <div className="mb-3 flex flex-wrap items-center gap-2">
+                  <span
+                    className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[10px] font-medium tracking-wide ${getMaterialBadgeClass(product.material)}`}
+                  >
+                    {product.material}
+                  </span>
+                  <span className="eyebrow text-muted-foreground">{product.category}</span>
+                </div>
                 <DialogTitle className="font-display text-3xl">{product.name}</DialogTitle>
                 <div className="flex items-center gap-3 mt-4">
                   {product.is_on_sale && (

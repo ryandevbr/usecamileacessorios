@@ -12,6 +12,7 @@ import {
   ArrowUp,
   ArrowDown,
   UserRound,
+  SlidersHorizontal,
   X,
   Save,
 } from "lucide-react";
@@ -19,12 +20,17 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { useStore } from "@/services/storeService";
+import {
+  mergeOptionValues,
+  optionLookupKey,
+  useCatalogOptions,
+  type CatalogOptionType,
+} from "@/services/catalogOptionsService";
 import { getAuthState, signOutAdmin, subscribeAuthChanges } from "@/services/authService";
 import { deleteStoreImage, uploadStoreImage } from "@/services/storageService";
 import {
   money,
   priceOf,
-  categoriesList,
   type AdminProfile,
   type Product,
   type Coupon,
@@ -32,6 +38,11 @@ import {
   type StoreAnnouncement,
 } from "@/data/catalog";
 import { normalizeCode } from "@/services/couponService";
+
+function ensureOptionPresent(options: string[], current: string | undefined): string[] {
+  if (!current) return options;
+  return options.includes(current) ? options : [...options, current];
+}
 
 export function AdminPanel() {
   const navigate = useNavigate();
@@ -54,6 +65,15 @@ export function AdminPanel() {
     saveProfile,
   } = useStore({ scope: "admin", enabled: allowed });
 
+  const {
+    categories: categoryOptions,
+    materials: materialOptions,
+    categoryNames,
+    materialNames,
+    addOption,
+    removeOption,
+  } = useCatalogOptions({ enabled: allowed });
+
   const [tab, setTab] = useState("Produtos");
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("");
@@ -71,6 +91,13 @@ export function AdminPanel() {
   const [sizeInfo, setSizeInfo] = useState("");
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [inlineOptionType, setInlineOptionType] = useState<CatalogOptionType | null>(null);
+  const [inlineOptionValue, setInlineOptionValue] = useState("");
+  const [savingOption, setSavingOption] = useState(false);
+  const [manageOptionsOpen, setManageOptionsOpen] = useState(false);
+  const [manageCategoryInput, setManageCategoryInput] = useState("");
+  const [manageMaterialInput, setManageMaterialInput] = useState("");
+  const [removingOptionId, setRemovingOptionId] = useState<string | null>(null);
   const [announcementDraft, setAnnouncementDraft] = useState<StoreAnnouncement>(data.announcement);
   const [profileDraft, setProfileDraft] = useState<AdminProfile>(data.profile);
   const pendingUploadsRef = useRef<string[]>([]);
@@ -176,14 +203,72 @@ export function AdminPanel() {
     }
   }
 
+  const handleCreateInlineOption = async (type: CatalogOptionType) => {
+    setSavingOption(true);
+    try {
+      const created = await addOption(type, inlineOptionValue);
+      setEdit((prev) =>
+        prev
+          ? type === "category"
+            ? { ...prev, category: created.name }
+            : { ...prev, material: created.name }
+          : prev,
+      );
+      setInlineOptionType(null);
+      setInlineOptionValue("");
+      toast.success(type === "category" ? "Categoria adicionada!" : "Material adicionado!");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Não foi possível salvar a opção.");
+    } finally {
+      setSavingOption(false);
+    }
+  };
+
+  const handleCreateManagedOption = async (type: CatalogOptionType) => {
+    const rawValue = type === "category" ? manageCategoryInput : manageMaterialInput;
+    setSavingOption(true);
+    try {
+      await addOption(type, rawValue);
+      if (type === "category") setManageCategoryInput("");
+      else setManageMaterialInput("");
+      toast.success(type === "category" ? "Categoria adicionada!" : "Material adicionado!");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Não foi possível salvar a opção.");
+    } finally {
+      setSavingOption(false);
+    }
+  };
+
+  const handleRemoveManagedOption = async (id: string, type: CatalogOptionType) => {
+    setRemovingOptionId(id);
+    try {
+      await removeOption(id);
+      toast.success(
+        type === "category" ? "Categoria removida da lista." : "Material removido da lista.",
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Erro ao remover opção.");
+    } finally {
+      setRemovingOptionId(null);
+    }
+  };
+
   const newProduct = () => {
     setSizeInfo("");
+    setInlineOptionType(null);
+    setInlineOptionValue("");
+    const defaultCategory = categoryNames.includes("Brincos")
+      ? "Brincos"
+      : (categoryNames[0] ?? "Brincos");
+    const defaultMaterial = materialNames.includes("Semijoia")
+      ? "Semijoia"
+      : (materialNames[0] ?? "Semijoia");
     setEdit({
       id: crypto.randomUUID(),
       name: "",
       sku: "",
-      category: "Brincos",
-      material: "Semijoia",
+      category: defaultCategory,
+      material: defaultMaterial,
       price: 0,
       sale_price: 0,
       is_on_sale: false,
@@ -197,11 +282,39 @@ export function AdminPanel() {
     });
   };
 
+  const filterCategories = mergeOptionValues(
+    categoryNames,
+    data.products.map((p) => p.category),
+  );
+  const filterMaterials = mergeOptionValues(
+    materialNames,
+    data.products.map((p) => p.material),
+  );
+  const formCategories = ensureOptionPresent(
+    mergeOptionValues(categoryNames, edit?.category ? [edit.category] : []),
+    edit?.category,
+  );
+  const formMaterials = ensureOptionPresent(
+    mergeOptionValues(materialNames, edit?.material ? [edit.material] : []),
+    edit?.material,
+  );
+  const bannerFilterOptions = ensureOptionPresent(
+    [
+      "Promoções",
+      ...mergeOptionValues([
+        ...materialNames,
+        ...categoryNames,
+        ...data.products.flatMap((p) => [p.material, p.category]),
+      ]),
+    ],
+    banner?.filter || undefined,
+  );
+
   const list = data.products.filter(
     (p) =>
       `${p.name} ${p.sku}`.toLowerCase().includes(query.toLowerCase()) &&
-      (!category || p.category === category) &&
-      (!material || p.material === material) &&
+      (!category || optionLookupKey(p.category) === optionLookupKey(category)) &&
+      (!material || optionLookupKey(p.material) === optionLookupKey(material)) &&
       (!status ||
         (status === "active" ? p.active : status === "inactive" ? !p.active : !p.in_stock)) &&
       (!sale || p.is_on_sale),
@@ -212,9 +325,13 @@ export function AdminPanel() {
   return (
     <main className="min-h-screen bg-background">
       <header className="border-b">
-        <div className="shell py-4 grid grid-cols-[minmax(0,1fr)_auto] items-center">
-          <img src="/logo.png" alt="Use Camile Acessórios" className="brand-logo" />
-          <div className="flex gap-2">
+        <div className="shell h-[68px] md:h-20 flex items-center justify-between gap-3">
+          <img
+            src="/logo.png"
+            alt="Use Camile Acessórios"
+            className="h-11 sm:h-12 md:h-14 w-auto shrink-0 object-contain"
+          />
+          <div className="flex gap-2 shrink-0">
             <Button
               variant="ghost"
               size="icon"
@@ -315,8 +432,10 @@ export function AdminPanel() {
                 onChange={(e) => setCategory(e.target.value)}
               >
                 <option value="">Todas as categorias</option>
-                {categoriesList.map((c) => (
-                  <option key={c}>{c}</option>
+                {filterCategories.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
                 ))}
               </select>
               <select
@@ -325,8 +444,11 @@ export function AdminPanel() {
                 onChange={(e) => setMaterial(e.target.value)}
               >
                 <option value="">Todos os materiais</option>
-                <option>Prata 925</option>
-                <option>Semijoia</option>
+                {filterMaterials.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
               </select>
               <select
                 aria-label="Status"
@@ -342,6 +464,18 @@ export function AdminPanel() {
                 <input type="checkbox" checked={sale} onChange={(e) => setSale(e.target.checked)} />
                 Só promoções
               </label>
+            </div>
+            <div className="mt-3 flex justify-end">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-8 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+                onClick={() => setManageOptionsOpen(true)}
+              >
+                <SlidersHorizontal size={13} />
+                Gerenciar categorias e materiais
+              </Button>
             </div>
             <div className="mt-6">
               {list.map((p) => (
@@ -403,6 +537,8 @@ export function AdminPanel() {
                       onClick={() => {
                         setEdit(structuredClone(p));
                         setSizeInfo("");
+                        setInlineOptionType(null);
+                        setInlineOptionValue("");
                       }}
                     >
                       <Pencil />
@@ -686,6 +822,8 @@ export function AdminPanel() {
         onOpenChange={(v) => {
           if (!v) {
             cleanupPendingUploads();
+            setInlineOptionType(null);
+            setInlineOptionValue("");
             setEdit(null);
           }
         }}
@@ -715,27 +853,162 @@ export function AdminPanel() {
                     onChange={(e) => setEdit({ ...edit, sku: e.target.value })}
                   />
                 </label>
-                <label>
-                  Categoria
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <label htmlFor="product-category" className="text-xs text-muted-foreground">
+                      Categoria
+                    </label>
+                    <button
+                      type="button"
+                      className="text-[11px] font-medium text-primary hover:underline cursor-pointer"
+                      onClick={() => {
+                        setInlineOptionType((prev) => (prev === "category" ? null : "category"));
+                        setInlineOptionValue("");
+                      }}
+                    >
+                      + Nova
+                    </button>
+                  </div>
                   <select
+                    id="product-category"
                     value={edit.category}
                     onChange={(e) => setEdit({ ...edit, category: e.target.value })}
                   >
-                    {categoriesList.map((c) => (
-                      <option key={c}>{c}</option>
+                    {formCategories.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
                     ))}
                   </select>
-                </label>
-                <label>
-                  Material
+                  {inlineOptionType === "category" && (
+                    <div className="rounded-md border bg-muted/60 p-2.5 space-y-2">
+                      <input
+                        type="text"
+                        aria-label="Nova categoria"
+                        className="text-base h-10"
+                        placeholder="Ex.: Tornozeleiras"
+                        value={inlineOptionValue}
+                        onChange={(e) => setInlineOptionValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void handleCreateInlineOption("category");
+                          } else if (e.key === "Escape") {
+                            setInlineOptionType(null);
+                            setInlineOptionValue("");
+                          }
+                        }}
+                        autoFocus
+                      />
+                      <div className="flex gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="flex-1"
+                          disabled={savingOption}
+                          onClick={() => void handleCreateInlineOption("category")}
+                        >
+                          {savingOption ? "Salvando..." : "Salvar"}
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={savingOption}
+                          onClick={() => {
+                            setInlineOptionType(null);
+                            setInlineOptionValue("");
+                          }}
+                        >
+                          Cancelar
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <label htmlFor="product-material" className="text-xs text-muted-foreground">
+                      Material
+                    </label>
+                    <button
+                      type="button"
+                      className="text-[11px] font-medium text-primary hover:underline cursor-pointer"
+                      onClick={() => {
+                        setInlineOptionType((prev) => (prev === "material" ? null : "material"));
+                        setInlineOptionValue("");
+                      }}
+                    >
+                      + Novo
+                    </button>
+                  </div>
                   <select
+                    id="product-material"
                     value={edit.material}
                     onChange={(e) => setEdit({ ...edit, material: e.target.value })}
                   >
-                    <option>Prata 925</option>
-                    <option>Semijoia</option>
+                    {formMaterials.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
                   </select>
-                </label>
+                  {inlineOptionType === "material" && (
+                    <div className="rounded-md border bg-muted/60 p-2.5 space-y-2">
+                      <input
+                        type="text"
+                        aria-label="Novo material"
+                        className="text-base h-10"
+                        placeholder="Ex.: Aço Inox, Ródio Branco"
+                        value={inlineOptionValue}
+                        onChange={(e) => setInlineOptionValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void handleCreateInlineOption("material");
+                          } else if (e.key === "Escape") {
+                            setInlineOptionType(null);
+                            setInlineOptionValue("");
+                          }
+                        }}
+                        autoFocus
+                      />
+                      <div className="flex gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="flex-1"
+                          disabled={savingOption}
+                          onClick={() => void handleCreateInlineOption("material")}
+                        >
+                          {savingOption ? "Salvando..." : "Salvar"}
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={savingOption}
+                          onClick={() => {
+                            setInlineOptionType(null);
+                            setInlineOptionValue("");
+                          }}
+                        >
+                          Cancelar
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="flex justify-end -mt-2">
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+                  onClick={() => setManageOptionsOpen(true)}
+                >
+                  <SlidersHorizontal size={12} />
+                  Gerenciar opções
+                </button>
               </div>
               <div className="flex gap-4 flex-wrap">
                 {(["active", "featured", "in_stock"] as const).map((key, i) => (
@@ -1082,8 +1355,10 @@ export function AdminPanel() {
                   onChange={(e) => setBanner({ ...banner, filter: e.target.value })}
                 >
                   <option value="">Sem filtro</option>
-                  {["Promoções", "Prata 925", "Semijoias", ...categoriesList].map((f) => (
-                    <option key={f}>{f}</option>
+                  {bannerFilterOptions.map((f) => (
+                    <option key={f} value={f}>
+                      {f}
+                    </option>
                   ))}
                 </select>
               </label>
@@ -1152,6 +1427,127 @@ export function AdminPanel() {
             >
               {saving ? "Excluindo..." : "Excluir"}
             </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={manageOptionsOpen} onOpenChange={setManageOptionsOpen}>
+        <DialogContent className="max-h-[88dvh] overflow-hidden flex flex-col w-[calc(100%-24px)] max-w-lg">
+          <DialogTitle className="font-display text-3xl">Categorias e materiais</DialogTitle>
+          <DialogDescription>
+            Adicione ou remova opções da lista de seleção. Produtos já cadastrados mantêm o texto
+            salvo mesmo se uma opção for excluída.
+          </DialogDescription>
+          <div className="overflow-y-auto min-h-0 space-y-6 pr-1">
+            <section className="space-y-3">
+              <h3 className="text-xl">Categorias</h3>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  aria-label="Adicionar categoria"
+                  className="text-base h-10"
+                  placeholder="Nova categoria..."
+                  value={manageCategoryInput}
+                  onChange={(e) => setManageCategoryInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void handleCreateManagedOption("category");
+                    }
+                  }}
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  className="h-10 px-4 shrink-0"
+                  disabled={savingOption}
+                  onClick={() => void handleCreateManagedOption("category")}
+                >
+                  <Plus size={14} />
+                  Adicionar
+                </Button>
+              </div>
+              <div className="divide-y border rounded-md">
+                {categoryOptions.map((item) => (
+                  <div
+                    key={item.id}
+                    className="flex items-center justify-between gap-3 px-3 py-2 text-sm"
+                  >
+                    <span className="truncate">{item.name}</span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
+                      disabled={removingOptionId === item.id}
+                      aria-label={`Excluir categoria ${item.name}`}
+                      onClick={() => void handleRemoveManagedOption(item.id, "category")}
+                    >
+                      <Trash2 size={14} />
+                    </Button>
+                  </div>
+                ))}
+                {categoryOptions.length === 0 && (
+                  <p className="px-3 py-4 text-xs text-muted-foreground text-center">
+                    Nenhuma categoria cadastrada.
+                  </p>
+                )}
+              </div>
+            </section>
+            <section className="space-y-3">
+              <h3 className="text-xl">Materiais</h3>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  aria-label="Adicionar material"
+                  className="text-base h-10"
+                  placeholder="Novo material..."
+                  value={manageMaterialInput}
+                  onChange={(e) => setManageMaterialInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void handleCreateManagedOption("material");
+                    }
+                  }}
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  className="h-10 px-4 shrink-0"
+                  disabled={savingOption}
+                  onClick={() => void handleCreateManagedOption("material")}
+                >
+                  <Plus size={14} />
+                  Adicionar
+                </Button>
+              </div>
+              <div className="divide-y border rounded-md">
+                {materialOptions.map((item) => (
+                  <div
+                    key={item.id}
+                    className="flex items-center justify-between gap-3 px-3 py-2 text-sm"
+                  >
+                    <span className="truncate">{item.name}</span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
+                      disabled={removingOptionId === item.id}
+                      aria-label={`Excluir material ${item.name}`}
+                      onClick={() => void handleRemoveManagedOption(item.id, "material")}
+                    >
+                      <Trash2 size={14} />
+                    </Button>
+                  </div>
+                ))}
+                {materialOptions.length === 0 && (
+                  <p className="px-3 py-4 text-xs text-muted-foreground text-center">
+                    Nenhum material cadastrado.
+                  </p>
+                )}
+              </div>
+            </section>
           </div>
         </DialogContent>
       </Dialog>

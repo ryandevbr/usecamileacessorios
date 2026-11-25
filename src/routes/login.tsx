@@ -65,7 +65,7 @@ function Login() {
         <img
           src="/logo.png"
           alt="Use Camile Acessórios"
-          className="w-52 mx-auto mb-8 mix-blend-multiply"
+          className="h-20 sm:h-24 w-auto mx-auto mb-6 object-contain"
         />
         <LockKeyhole size={22} className="mx-auto text-primary mb-4" />
         <h1 className="text-4xl">Seu espaço de cuidado</h1>

@@ -182,7 +182,17 @@ export const initialData: StoreData = {
   },
   profile: { name: "Administradora", email: "", avatar: "" },
 };
-export const categoriesList = ["Anéis", "Colares", "Brincos", "Pulseiras", "Conjuntos"];
+export const DEFAULT_CATEGORIES = [
+  "Anéis",
+  "Colares",
+  "Brincos",
+  "Pulseiras",
+  "Tornozeleiras",
+  "Conjuntos",
+] as const;
+export const DEFAULT_MATERIALS = ["Prata 925", "Semijoia"] as const;
+export const categoriesList: string[] = [...DEFAULT_CATEGORIES];
+export const materialsList: string[] = [...DEFAULT_MATERIALS];
 export const money = (n: number) =>
   n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 export const priceOf = (p: Product) => (p.is_on_sale ? p.sale_price : p.price);
