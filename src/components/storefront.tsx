@@ -259,7 +259,7 @@ export function Storefront() {
               key={b.id}
               src={b.image_url}
               alt={b.alt}
-              className={`hero-photo ${i === currentSlide ? "opacity-100" : "opacity-0"}`}
+              className={`hero-photo w-full h-full object-cover ${i === currentSlide ? "opacity-100" : "opacity-0"}`}
               loading={i === 0 ? "eager" : "lazy"}
               fetchPriority={i === 0 ? "high" : "auto"}
               decoding="async"

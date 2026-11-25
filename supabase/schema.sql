@@ -329,8 +329,8 @@ values (
   'store-media',
   'store-media',
   true,
-  5242880,
-  array['image/webp', 'image/jpeg', 'image/png', 'image/avif']
+  10485760,
+  array['image/webp', 'image/jpeg', 'image/png', 'image/avif', 'image/gif']
 )
 on conflict (id) do nothing;
 

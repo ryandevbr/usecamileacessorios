@@ -289,9 +289,19 @@ export function AdminPanel() {
     try {
       const folder = kind === "product" ? "products" : kind === "banner" ? "banners" : "profiles";
       const result = await uploadStoreImage(file, folder);
-      setSizeInfo(
-        `${Math.round(result.original / 1024)} KB → ${Math.round(result.compressed / 1024)} KB`,
-      );
+      if (kind === "banner") {
+        const sizeLabel =
+          result.original >= 1024 * 1024
+            ? `${(result.original / (1024 * 1024)).toFixed(1).replace(".", ",")} MB`
+            : `${Math.round(result.original / 1024)} KB`;
+        setSizeInfo(sizeLabel);
+        pendingUploadsRef.current.push(result.url);
+        setBanner((prev) => (prev ? { ...prev, image_url: result.url } : prev));
+      } else {
+        setSizeInfo(
+          `${Math.round(result.original / 1024)} KB → ${Math.round(result.compressed / 1024)} KB`,
+        );
+      }
       if (kind === "product") {
         lastProductFileRef.current = file;
         pendingUploadsRef.current.push(result.url);
@@ -299,10 +309,6 @@ export function AdminPanel() {
         if (autoFillOnUpload && sessionId === productModalSessionRef.current) {
           void runAiAnalysis({ mode: "auto", file, imageUrl: result.url });
         }
-      }
-      if (kind === "banner") {
-        pendingUploadsRef.current.push(result.url);
-        setBanner((prev) => (prev ? { ...prev, image_url: result.url } : prev));
       }
       if (kind === "profile") {
         const nextProfile = { ...profileDraft, avatar: result.url };
@@ -1496,7 +1502,9 @@ export function AdminPanel() {
                 />
               )}
               {uploading && <p className="text-xs text-muted-foreground">Enviando foto...</p>}
-              {sizeInfo && <p className="text-primary text-xs">{sizeInfo}</p>}
+              {sizeInfo && (
+                <p className="text-xs text-muted-foreground">Arquivo original ({sizeInfo})</p>
+              )}
               <label>
                 Ou URL da imagem
                 <input
