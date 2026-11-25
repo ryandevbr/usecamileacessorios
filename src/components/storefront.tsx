@@ -53,12 +53,15 @@ function getMaterialBadgeClass(material: string): string {
   return "bg-background/95 text-foreground/90 border border-border/80 backdrop-blur-sm";
 }
 
+const PRODUCTS_PER_PAGE = 16;
+
 export function Storefront() {
   const { data, loading, error } = useStore({ scope: "public" });
   const { categoryNames, materialNames } = useCatalogOptions();
   const [filter, setFilter] = useState("Todos");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState("featured");
+  const [visibleCount, setVisibleCount] = useState(PRODUCTS_PER_PAGE);
   const [product, setProduct] = useState<Product | null>(null);
   const [bag, setBag] = useState(false);
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -88,12 +91,15 @@ export function Storefront() {
   useEffect(() => {
     if (ready) localStorage.setItem("camile-bag", JSON.stringify(cart));
   }, [cart, ready]);
+  useEffect(() => {
+    setVisibleCount(PRODUCTS_PER_PAGE);
+  }, [filter, query, sort]);
   const banners = data.banners.filter((b) => b.active);
   const currentSlide = banners.length > 0 ? slide % banners.length : 0;
   const activeBanner = banners[currentSlide];
   useEffect(() => {
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches || banners.length < 2) return;
-    const timer = setInterval(() => setSlide((s) => (s + 1) % banners.length), 6500);
+    const timer = setInterval(() => setSlide((s) => (s + 1) % banners.length), 3000);
     return () => clearInterval(timer);
   }, [banners.length]);
   function open(p: Product | null) {
@@ -127,7 +133,7 @@ export function Storefront() {
     "Promoções",
     ...mergeOptionValues([...dynamicMaterials, ...dynamicCategories]),
   ];
-  const visible = activeProducts
+  const filteredProducts = activeProducts
     .filter(
       (p) =>
         matchesFilter(p, filter) &&
@@ -140,6 +146,9 @@ export function Storefront() {
           ? priceOf(b) - priceOf(a)
           : Number(b.featured) - Number(a.featured),
     );
+  const visibleProducts = filteredProducts.slice(0, visibleCount);
+  const remainingCount = Math.max(0, filteredProducts.length - visibleCount);
+  const nextBatchCount = Math.min(PRODUCTS_PER_PAGE, remainingCount);
   const coupon = data.coupons.find((c) => c.code === applied);
   const totals = calculateCoupon(cart, coupon);
   const subtotal = cart.reduce((s, i) => s + priceOf(i.product) * i.quantity, 0);
@@ -258,8 +267,8 @@ export function Storefront() {
           <div
             className={`hero-media ${
               activeBanner?.mobile_image_url?.trim()
-                ? "aspect-[4/5] max-h-[460px] md:aspect-auto md:max-h-none"
-                : "aspect-[16/10] md:aspect-auto"
+                ? "aspect-4/5 max-h-115 md:aspect-auto md:max-h-none"
+                : "aspect-16/10 md:aspect-auto"
             }`}
           >
             {banners.map((b, i) => {
@@ -287,7 +296,7 @@ export function Storefront() {
             <div className="hero-scrim pointer-events-none" />
             <div
               aria-hidden="true"
-              className="pointer-events-none absolute inset-x-0 bottom-0 h-7 bg-gradient-to-t from-[#FAF8FB] to-transparent md:hidden"
+              className="pointer-events-none absolute inset-x-0 bottom-0 h-7 bg-linear-to-t from-[#FAF8FB] to-transparent md:hidden"
             />
             {banners.length > 1 && (
               <div className="absolute bottom-3 right-4 md:bottom-6 md:right-8 z-10 flex gap-2">
@@ -403,7 +412,7 @@ export function Storefront() {
             </select>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-5 gap-y-10">
-            {visible.map((p) => (
+            {visibleProducts.map((p) => (
               <article key={p.id}>
                 <div className="product-image">
                   <Button
@@ -466,20 +475,35 @@ export function Storefront() {
               </article>
             ))}
           </div>
-          {loading && visible.length === 0 ? (
+          {loading && filteredProducts.length === 0 ? (
             <p className="py-16 text-center text-muted-foreground">Carregando vitrine...</p>
-          ) : error && visible.length === 0 ? (
+          ) : error && filteredProducts.length === 0 ? (
             <p className="py-16 text-center text-muted-foreground">
               Não foi possível carregar o catálogo no momento.
             </p>
           ) : (
-            visible.length === 0 && (
+            filteredProducts.length === 0 && (
               <p className="py-16 text-center text-muted-foreground">Nenhuma peça encontrada.</p>
             )
           )}
-          <p className="text-center text-muted-foreground text-[10px] mt-9">
-            {visible.length} peças selecionadas com carinho
-          </p>
+          {filteredProducts.length > 0 && (
+            <div className="mt-10 flex flex-col items-center gap-4">
+              <p className="text-center text-xs text-muted-foreground">
+                Exibindo {visibleProducts.length} de {filteredProducts.length}{" "}
+                {filteredProducts.length === 1 ? "peça" : "peças"}
+              </p>
+              {visibleCount < filteredProducts.length && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setVisibleCount((prev) => prev + PRODUCTS_PER_PAGE)}
+                  className="min-h-11 px-8 rounded-full border-[#C91E7C] bg-transparent text-[#C91E7C] text-xs font-medium tracking-wide transition-colors hover:bg-[#C91E7C] hover:text-white"
+                >
+                  Ver mais {nextBatchCount} {nextBatchCount === 1 ? "peça" : "peças"}
+                </Button>
+              )}
+            </div>
+          )}
         </section>
         <section id="envios-entregas" className="bg-muted py-16">
           <div className="shell">
