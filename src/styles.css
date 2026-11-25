@@ -213,6 +213,11 @@ label {
   overflow: hidden;
   background: var(--muted);
 }
+.hero-media {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
 .hero-photo {
   position: absolute;
   inset: 0;
@@ -337,26 +342,29 @@ label {
     width: auto;
   }
   .hero {
-    min-height: 660px;
-    align-items: flex-end;
+    min-height: auto;
+    flex-direction: column;
+    align-items: stretch;
+    background: #faf8fb;
   }
-  .hero-photo {
-    object-position: 65% center;
+  .hero-media {
+    position: relative;
+    inset: auto;
+    width: 100%;
+    background: #faf8fb;
   }
   .hero-scrim {
-    background: linear-gradient(
-      0deg,
-      var(--muted) 3%,
-      color-mix(in oklch, var(--muted) 95%, transparent) 27%,
-      color-mix(in oklch, var(--muted) 15%, transparent) 70%
-    );
+    display: none;
   }
   .hero-content {
-    padding-block: 34px;
+    padding-top: 20px;
+    padding-bottom: 36px;
+    background: #faf8fb;
   }
   .hero h1 {
-    font-size: 44px;
-    max-width: 350px;
+    font-size: 40px;
+    line-height: 1.08;
+    max-width: 360px;
   }
   .section-title {
     font-size: 36px;

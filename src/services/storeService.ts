@@ -40,6 +40,7 @@ interface ProductRow {
 interface HeroBannerRow {
   id: string;
   image_url: string;
+  mobile_image_url?: string | null;
   alt: string;
   active: boolean;
   filter: string | null;
@@ -108,6 +109,7 @@ function mapBannerRow(row: HeroBannerRow, fallbackIndex: number): Banner {
   return {
     id: row.id,
     image_url: row.image_url,
+    mobile_image_url: row.mobile_image_url ?? "",
     alt: row.alt,
     active: Boolean(row.active),
     filter: row.filter ?? "",
@@ -153,9 +155,11 @@ function toProductPayload(product: Product) {
 }
 
 function toBannerPayload(banner: Banner, displayOrder: number) {
+  const mobileUrl = (banner.mobile_image_url ?? "").trim();
   return {
     id: banner.id || crypto.randomUUID(),
     image_url: banner.image_url.trim(),
+    mobile_image_url: mobileUrl ? mobileUrl : null,
     alt: banner.alt.trim(),
     active: Boolean(banner.active),
     filter: banner.filter.trim(),
@@ -212,7 +216,7 @@ export async function fetchStoreData(scope: StoreScope = "public"): Promise<Stor
 
   let bannersQuery = supabase
     .from("hero_banners")
-    .select("id, image_url, alt, active, filter, display_order")
+    .select("id, image_url, mobile_image_url, alt, active, filter, display_order")
     .order("display_order", { ascending: true })
     .order("created_at", { ascending: true });
 
@@ -243,8 +247,28 @@ export async function fetchStoreData(scope: StoreScope = "public"): Promise<Stor
   if (productsRes.error) {
     throw new Error(`Erro ao carregar produtos: ${productsRes.error.message}`);
   }
+  let bannersRows = (bannersRes.data ?? []) as HeroBannerRow[];
   if (bannersRes.error) {
-    throw new Error(`Erro ao carregar banners: ${bannersRes.error.message}`);
+    if (
+      bannersRes.error.code === "42703" ||
+      bannersRes.error.message.includes("mobile_image_url")
+    ) {
+      let fallbackBannersQuery = supabase
+        .from("hero_banners")
+        .select("id, image_url, alt, active, filter, display_order")
+        .order("display_order", { ascending: true })
+        .order("created_at", { ascending: true });
+      if (scope === "public") {
+        fallbackBannersQuery = fallbackBannersQuery.eq("active", true);
+      }
+      const fallbackRes = await fallbackBannersQuery;
+      if (fallbackRes.error) {
+        throw new Error(`Erro ao carregar banners: ${fallbackRes.error.message}`);
+      }
+      bannersRows = (fallbackRes.data ?? []) as HeroBannerRow[];
+    } else {
+      throw new Error(`Erro ao carregar banners: ${bannersRes.error.message}`);
+    }
   }
   if (couponsRes.error) {
     throw new Error(`Erro ao carregar cupons: ${couponsRes.error.message}`);
@@ -288,7 +312,7 @@ export async function fetchStoreData(scope: StoreScope = "public"): Promise<Stor
 
   return {
     products: ((productsRes.data ?? []) as ProductRow[]).map(mapProductRow),
-    banners: ((bannersRes.data ?? []) as HeroBannerRow[]).map(mapBannerRow),
+    banners: bannersRows.map(mapBannerRow),
     coupons: ((couponsRes.data ?? []) as CouponRow[]).map(mapCouponRow),
     announcement,
     profile,
@@ -306,7 +330,9 @@ function isImageStillReferenced(
   );
   if (usedInProducts) return true;
   const usedInBanners = state.banners.some(
-    (b) => b.image_url === imageUrl && !(exclude?.kind === "banners" && b.id === exclude.id),
+    (b) =>
+      (b.image_url === imageUrl || (b.mobile_image_url ?? "") === imageUrl) &&
+      !(exclude?.kind === "banners" && b.id === exclude.id),
   );
   if (usedInBanners) return true;
   return state.profile.avatar === imageUrl;
@@ -348,22 +374,25 @@ export async function removeProduct(id: string, imageUrlToClean?: string): Promi
 export async function upsertBanner(
   banner: Banner,
   displayOrder: number,
-  previousImageUrl?: string,
+  previousImageUrls: string[] = [],
 ): Promise<Banner> {
   const client = requireSupabase();
   const payload = toBannerPayload(banner, displayOrder);
   const { data, error } = await client
     .from("hero_banners")
     .upsert(payload, { onConflict: "id" })
-    .select("id, image_url, alt, active, filter, display_order")
+    .select("id, image_url, mobile_image_url, alt, active, filter, display_order")
     .single();
 
   if (error || !data) {
     throw new Error(`Erro ao salvar banner: ${error?.message ?? "resposta vazia"}`);
   }
 
-  if (previousImageUrl && previousImageUrl !== payload.image_url) {
-    await deleteStoreImage(previousImageUrl);
+  const kept = new Set([payload.image_url, payload.mobile_image_url ?? ""]);
+  for (const prevUrl of previousImageUrls) {
+    if (prevUrl && !kept.has(prevUrl)) {
+      await deleteStoreImage(prevUrl);
+    }
   }
 
   return mapBannerRow(data as HeroBannerRow, displayOrder);
@@ -375,7 +404,7 @@ export async function saveBannersOrder(banners: Banner[]): Promise<Banner[]> {
   const { data, error } = await client
     .from("hero_banners")
     .upsert(payloads, { onConflict: "id" })
-    .select("id, image_url, alt, active, filter, display_order")
+    .select("id, image_url, mobile_image_url, alt, active, filter, display_order")
     .order("display_order", { ascending: true });
 
   if (error) {
@@ -385,14 +414,16 @@ export async function saveBannersOrder(banners: Banner[]): Promise<Banner[]> {
   return ((data ?? []) as HeroBannerRow[]).map(mapBannerRow);
 }
 
-export async function removeBanner(id: string, imageUrlToClean?: string): Promise<void> {
+export async function removeBanner(id: string, imageUrlsToClean: string[] = []): Promise<void> {
   const client = requireSupabase();
   const { error } = await client.from("hero_banners").delete().eq("id", id);
   if (error) {
     throw new Error(`Erro ao excluir banner: ${error.message}`);
   }
-  if (imageUrlToClean) {
-    await deleteStoreImage(imageUrlToClean);
+  for (const url of imageUrlsToClean) {
+    if (url) {
+      await deleteStoreImage(url);
+    }
   }
 }
 
@@ -650,14 +681,26 @@ export function useStore(options?: { scope?: StoreScope; enabled?: boolean }) {
         return;
       }
 
-      const oldUrl =
+      const oldUrls: string[] = [];
+      if (
         existing?.image_url &&
         existing.image_url !== banner.image_url &&
         !isImageStillReferenced(existing.image_url, data, { kind: "banners", id: existing.id })
-          ? existing.image_url
-          : undefined;
+      ) {
+        oldUrls.push(existing.image_url);
+      }
+      if (
+        existing?.mobile_image_url &&
+        existing.mobile_image_url !== (banner.mobile_image_url ?? "") &&
+        !isImageStillReferenced(existing.mobile_image_url, data, {
+          kind: "banners",
+          id: existing.id,
+        })
+      ) {
+        oldUrls.push(existing.mobile_image_url);
+      }
 
-      const saved = await upsertBanner(banner, displayOrder, oldUrl);
+      const saved = await upsertBanner(banner, displayOrder, oldUrls);
       setData((prev) => ({
         ...prev,
         banners: prev.banners.some((b) => b.id === saved.id)
@@ -699,13 +742,21 @@ export function useStore(options?: { scope?: StoreScope; enabled?: boolean }) {
         return;
       }
 
-      const cleanUrl =
+      const cleanUrls: string[] = [];
+      if (
         existing?.image_url &&
         !isImageStillReferenced(existing.image_url, data, { kind: "banners", id })
-          ? existing.image_url
-          : undefined;
+      ) {
+        cleanUrls.push(existing.image_url);
+      }
+      if (
+        existing?.mobile_image_url &&
+        !isImageStillReferenced(existing.mobile_image_url, data, { kind: "banners", id })
+      ) {
+        cleanUrls.push(existing.mobile_image_url);
+      }
 
-      await removeBanner(id, cleanUrl);
+      await removeBanner(id, cleanUrls);
       setData((prev) => ({
         ...prev,
         banners: prev.banners.filter((b) => b.id !== id),

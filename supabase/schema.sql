@@ -46,10 +46,11 @@ create table if not exists public.products (
     check (not is_on_sale or (sale_price > 0 and sale_price < price))
 );
 
--- Banners do Hero com ordem de exibição e filtro opcional
+-- Banners do Hero com ordem de exibição, imagem mobile opcional e filtro opcional
 create table if not exists public.hero_banners (
   id uuid primary key default gen_random_uuid(),
   image_url text not null check (btrim(image_url) <> ''),
+  mobile_image_url text,
   alt text not null check (btrim(alt) <> ''),
   active boolean not null default true,
   filter text not null default '',

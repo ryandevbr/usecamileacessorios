@@ -90,6 +90,7 @@ export function Storefront() {
   }, [cart, ready]);
   const banners = data.banners.filter((b) => b.active);
   const currentSlide = banners.length > 0 ? slide % banners.length : 0;
+  const activeBanner = banners[currentSlide];
   useEffect(() => {
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches || banners.length < 2) return;
     const timer = setInterval(() => setSlide((s) => (s + 1) % banners.length), 6500);
@@ -254,35 +255,71 @@ export function Storefront() {
       </header>
       <main>
         <section id="inicio" className="hero">
-          {banners.map((b, i) => (
-            <img
-              key={b.id}
-              src={b.image_url}
-              alt={b.alt}
-              className={`hero-photo w-full h-full object-cover ${i === currentSlide ? "opacity-100" : "opacity-0"}`}
-              loading={i === 0 ? "eager" : "lazy"}
-              fetchPriority={i === 0 ? "high" : "auto"}
-              decoding="async"
-              onClick={() => b.filter && scroll(b.filter)}
+          <div
+            className={`hero-media ${
+              activeBanner?.mobile_image_url?.trim()
+                ? "aspect-[4/5] max-h-[460px] md:aspect-auto md:max-h-none"
+                : "aspect-[16/10] md:aspect-auto"
+            }`}
+          >
+            {banners.map((b, i) => {
+              const mobileUrl = b.mobile_image_url?.trim() ?? "";
+              return (
+                <picture
+                  key={b.id}
+                  className={`hero-photo block ${i === currentSlide ? "opacity-100" : "opacity-0 pointer-events-none"}`}
+                  onClick={() => b.filter && scroll(b.filter)}
+                >
+                  {mobileUrl && <source media="(max-width: 767px)" srcSet={mobileUrl} />}
+                  <img
+                    src={b.image_url}
+                    alt={b.alt}
+                    className={`w-full h-full object-cover ${
+                      mobileUrl ? "object-center" : "object-[72%_center] md:object-center"
+                    }`}
+                    loading={i === 0 ? "eager" : "lazy"}
+                    fetchPriority={i === 0 ? "high" : "auto"}
+                    decoding="async"
+                  />
+                </picture>
+              );
+            })}
+            <div className="hero-scrim pointer-events-none" />
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-x-0 bottom-0 h-7 bg-gradient-to-t from-[#FAF8FB] to-transparent md:hidden"
             />
-          ))}
-          <div className="hero-scrim pointer-events-none" />
-          <div className="shell hero-content pointer-events-none">
+            {banners.length > 1 && (
+              <div className="absolute bottom-3 right-4 md:bottom-6 md:right-8 z-10 flex gap-2">
+                {banners.map((b, i) => (
+                  <Button
+                    key={b.id}
+                    variant="ghost"
+                    className={`p-0 h-2 w-2 rounded-full ${i === currentSlide ? "bg-primary" : "bg-foreground/25"}`}
+                    aria-label={`Foto ${i + 1}`}
+                    onClick={() => setSlide(i)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="shell hero-content bg-[#FAF8FB] md:bg-transparent pointer-events-none">
             <div className="max-w-127.5 pointer-events-auto">
-              <p className="eyebrow text-muted-foreground flex gap-2 items-center mb-5">
-                <Sparkles size={15} className="text-primary" /> Delicadeza que faz a diferença
+              <p className="eyebrow text-[#7A6A66] md:text-muted-foreground flex gap-2 items-center mb-4 md:mb-5">
+                <Sparkles size={15} className="text-[#C91E7C] md:text-primary" /> Delicadeza que faz
+                a diferença
               </p>
-              <h1>
+              <h1 className="text-[#3D3533] md:text-foreground">
                 Invista em você:
                 <br />
                 acessórios são a<br />
-                <em className="text-primary">alma do look!</em>
+                <em className="text-[#C91E7C] md:text-primary">alma do look!</em>
               </h1>
-              <p className="text-muted-foreground text-sm leading-7 mt-6 max-w-98.75">
+              <p className="text-[#5C514E] md:text-muted-foreground text-sm leading-7 mt-4 md:mt-6 max-w-98.75">
                 Prata 925 e Semijoias selecionadas para realçar o seu estilo. Peças especiais, para
                 todos os seus momentos.
               </p>
-              <div className="flex flex-wrap gap-3 mt-7">
+              <div className="flex flex-wrap gap-3 mt-6 md:mt-7">
                 <Button size="lg" onClick={() => scroll("Todos")}>
                   Ver vitrine <ArrowRight />
                 </Button>
@@ -295,23 +332,12 @@ export function Storefront() {
               </div>
               <a
                 href="#envios-entregas"
-                className="inline-flex gap-2 items-center text-[11px] text-muted-foreground mt-5"
+                className="inline-flex gap-2 items-center text-[11px] text-[#5C514E] md:text-muted-foreground mt-5"
               >
                 <Truck size={14} />
                 Envios e entregas <ArrowRight size={12} />
               </a>
             </div>
-          </div>
-          <div className="absolute bottom-6 right-8 flex gap-2">
-            {banners.map((b, i) => (
-              <Button
-                key={b.id}
-                variant="ghost"
-                className={`p-0 h-2 w-2 rounded-full ${i === currentSlide ? "bg-primary" : "bg-foreground/25"}`}
-                aria-label={`Foto ${i + 1}`}
-                onClick={() => setSlide(i)}
-              />
-            ))}
           </div>
         </section>
         <div className="bg-background border-b">

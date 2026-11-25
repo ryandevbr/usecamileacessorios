@@ -45,6 +45,7 @@ export interface Coupon {
 export interface Banner {
   id: string;
   image_url: string;
+  mobile_image_url?: string;
   alt: string;
   active: boolean;
   filter: string;
