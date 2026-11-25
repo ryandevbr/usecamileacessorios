@@ -13,6 +13,8 @@ import {
   ArrowDown,
   UserRound,
   SlidersHorizontal,
+  Sparkles,
+  Loader2,
   X,
   Save,
 } from "lucide-react";
@@ -26,6 +28,7 @@ import {
   useCatalogOptions,
   type CatalogOptionType,
 } from "@/services/catalogOptionsService";
+import { analyzeProductWithAi, isAnalyzableImageUrl } from "@/services/aiProductService";
 import { getAuthState, signOutAdmin, subscribeAuthChanges } from "@/services/authService";
 import { deleteStoreImage, uploadStoreImage } from "@/services/storageService";
 import {
@@ -91,6 +94,8 @@ export function AdminPanel() {
   const [sizeInfo, setSizeInfo] = useState("");
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [autoFillOnUpload, setAutoFillOnUpload] = useState(true);
+  const [analyzingAi, setAnalyzingAi] = useState(false);
   const [inlineOptionType, setInlineOptionType] = useState<CatalogOptionType | null>(null);
   const [inlineOptionValue, setInlineOptionValue] = useState("");
   const [savingOption, setSavingOption] = useState(false);
@@ -101,6 +106,8 @@ export function AdminPanel() {
   const [announcementDraft, setAnnouncementDraft] = useState<StoreAnnouncement>(data.announcement);
   const [profileDraft, setProfileDraft] = useState<AdminProfile>(data.profile);
   const pendingUploadsRef = useRef<string[]>([]);
+  const lastProductFileRef = useRef<File | null>(null);
+  const productModalSessionRef = useRef(0);
 
   const cleanupPendingUploads = (keepUrl?: string) => {
     const toDelete = pendingUploadsRef.current.filter((url) => url && url !== keepUrl);
@@ -174,7 +181,110 @@ export function AdminPanel() {
     }
   };
 
+  async function runAiAnalysis(options: {
+    mode: "auto" | "manual";
+    file?: File | null;
+    imageUrl?: string;
+  }) {
+    const sessionId = productModalSessionRef.current;
+    const fileToUse = options.file !== undefined ? options.file : lastProductFileRef.current;
+    const urlToUse = options.imageUrl ?? edit?.image_url ?? "";
+
+    if (!fileToUse && !isAnalyzableImageUrl(urlToUse)) {
+      toast.error("Envie uma foto ou informe uma URL válida antes de analisar com IA.");
+      return;
+    }
+
+    const availableCategories =
+      formCategories.length > 0 ? formCategories : mergeOptionValues(categoryNames);
+    const availableMaterials =
+      formMaterials.length > 0 ? formMaterials : mergeOptionValues(materialNames);
+
+    setAnalyzingAi(true);
+    try {
+      const analysis = await analyzeProductWithAi({
+        file: fileToUse,
+        imageUrl: urlToUse,
+        availableCategories,
+        availableMaterials,
+      });
+
+      if (sessionId !== productModalSessionRef.current) return;
+
+      setEdit((prev) => {
+        if (!prev) return prev;
+
+        const validCategories = ensureOptionPresent(
+          mergeOptionValues(categoryNames, prev.category ? [prev.category] : []),
+          prev.category,
+        );
+        const validMaterials = ensureOptionPresent(
+          mergeOptionValues(materialNames, prev.material ? [prev.material] : []),
+          prev.material,
+        );
+
+        const matchedCategory = analysis.category
+          ? validCategories.find((c) => optionLookupKey(c) === optionLookupKey(analysis.category))
+          : undefined;
+        const matchedMaterial = analysis.material
+          ? validMaterials.find((m) => optionLookupKey(m) === optionLookupKey(analysis.material))
+          : undefined;
+
+        const aiChars = analysis.characteristics.map((item) => ({
+          attribute: item.label,
+          value: item.value,
+        }));
+
+        let nextCharacteristics = prev.characteristics;
+        if (aiChars.length > 0) {
+          if (options.mode === "manual") {
+            nextCharacteristics = aiChars;
+          } else {
+            const hasFilled = prev.characteristics.some(
+              (row) => row.attribute.trim() !== "" || row.value.trim() !== "",
+            );
+            if (!hasFilled) {
+              nextCharacteristics = aiChars;
+            } else {
+              const usedKeys = new Set(
+                prev.characteristics.map((row) => optionLookupKey(row.attribute)).filter(Boolean),
+              );
+              const remainingAi = aiChars.filter(
+                (item) => !usedKeys.has(optionLookupKey(item.attribute)),
+              );
+              let cursor = 0;
+              nextCharacteristics = prev.characteristics.map((row) => {
+                if (row.attribute.trim() !== "" || row.value.trim() !== "") return row;
+                const replacement = remainingAi[cursor++];
+                return replacement ?? row;
+              });
+            }
+          }
+        }
+
+        return {
+          ...prev,
+          name: analysis.name || prev.name,
+          category: matchedCategory ?? prev.category,
+          material: matchedMaterial ?? prev.material,
+          description: analysis.description || prev.description,
+          characteristics: nextCharacteristics,
+        };
+      });
+
+      toast.success("Campos preenchidos com IA! Revise o material e informe o preço.");
+    } catch (err) {
+      if (sessionId !== productModalSessionRef.current) return;
+      toast.error(err instanceof Error ? err.message : "Erro ao analisar a peça com IA.");
+    } finally {
+      if (sessionId === productModalSessionRef.current) {
+        setAnalyzingAi(false);
+      }
+    }
+  }
+
   async function upload(file: File, kind: "product" | "banner" | "profile") {
+    const sessionId = productModalSessionRef.current;
     setUploading(true);
     try {
       const folder = kind === "product" ? "products" : kind === "banner" ? "banners" : "profiles";
@@ -183,8 +293,12 @@ export function AdminPanel() {
         `${Math.round(result.original / 1024)} KB → ${Math.round(result.compressed / 1024)} KB`,
       );
       if (kind === "product") {
+        lastProductFileRef.current = file;
         pendingUploadsRef.current.push(result.url);
         setEdit((prev) => (prev ? { ...prev, image_url: result.url } : prev));
+        if (autoFillOnUpload && sessionId === productModalSessionRef.current) {
+          void runAiAnalysis({ mode: "auto", file, imageUrl: result.url });
+        }
       }
       if (kind === "banner") {
         pendingUploadsRef.current.push(result.url);
@@ -254,6 +368,10 @@ export function AdminPanel() {
   };
 
   const newProduct = () => {
+    productModalSessionRef.current += 1;
+    lastProductFileRef.current = null;
+    setAnalyzingAi(false);
+    setAutoFillOnUpload(true);
     setSizeInfo("");
     setInlineOptionType(null);
     setInlineOptionValue("");
@@ -535,6 +653,10 @@ export function AdminPanel() {
                       title="Editar"
                       aria-label={`Editar ${p.name}`}
                       onClick={() => {
+                        productModalSessionRef.current += 1;
+                        lastProductFileRef.current = null;
+                        setAnalyzingAi(false);
+                        setAutoFillOnUpload(false);
                         setEdit(structuredClone(p));
                         setSizeInfo("");
                         setInlineOptionType(null);
@@ -821,6 +943,9 @@ export function AdminPanel() {
         open={!!edit}
         onOpenChange={(v) => {
           if (!v) {
+            productModalSessionRef.current += 1;
+            lastProductFileRef.current = null;
+            setAnalyzingAi(false);
             cleanupPendingUploads();
             setInlineOptionType(null);
             setInlineOptionValue("");
@@ -838,6 +963,73 @@ export function AdminPanel() {
           <DialogDescription>Detalhes da peça</DialogDescription>
           {edit && (
             <div className="overflow-y-auto min-h-0 space-y-5 pr-1">
+              <div className="rounded-lg border bg-muted/40 p-4 space-y-3">
+                <label>
+                  Foto principal
+                  <input
+                    type="file"
+                    accept="image/*"
+                    disabled={uploading}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) void upload(f, "product");
+                    }}
+                  />
+                </label>
+                {edit.image_url && (
+                  <img
+                    src={edit.image_url}
+                    alt="Prévia da peça"
+                    className="h-40 w-full rounded object-contain bg-background border"
+                  />
+                )}
+                {uploading && <p className="text-xs text-muted-foreground">Enviando foto...</p>}
+                {sizeInfo && <p className="text-xs text-primary">Foto comprimida: {sizeInfo}</p>}
+                <label>
+                  Ou URL da foto
+                  <input
+                    value={edit.image_url.startsWith("data:") ? "" : edit.image_url}
+                    onChange={(e) => {
+                      lastProductFileRef.current = null;
+                      setEdit({ ...edit, image_url: e.target.value });
+                    }}
+                    placeholder="https://..."
+                  />
+                </label>
+                <div className="pt-2 border-t space-y-2.5">
+                  <label className="flex items-center gap-2 text-xs text-foreground cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={autoFillOnUpload}
+                      onChange={(e) => setAutoFillOnUpload(e.target.checked)}
+                    />
+                    Preencher automaticamente ao enviar foto
+                  </label>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="w-full h-11 gap-2 border border-primary/25 bg-primary/10 text-primary hover:bg-primary/15"
+                    disabled={
+                      uploading ||
+                      analyzingAi ||
+                      (!lastProductFileRef.current && !isAnalyzableImageUrl(edit.image_url))
+                    }
+                    onClick={() => void runAiAnalysis({ mode: "manual" })}
+                  >
+                    {analyzingAi ? (
+                      <>
+                        <Loader2 className="animate-spin" size={16} />
+                        Analisando a peça com IA...
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles size={16} />
+                        Preencher detalhes com IA
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </div>
               <div className="field-grid">
                 <label>
                   Nome
@@ -1022,35 +1214,6 @@ export function AdminPanel() {
                   </label>
                 ))}
               </div>
-              <label>
-                Foto principal
-                <input
-                  type="file"
-                  accept="image/*"
-                  disabled={uploading}
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) void upload(f, "product");
-                  }}
-                />
-              </label>
-              {edit.image_url && (
-                <img
-                  src={edit.image_url}
-                  alt="Prévia da peça"
-                  className="h-36 w-full object-contain bg-muted"
-                />
-              )}
-              {uploading && <p className="text-xs text-muted-foreground">Enviando foto...</p>}
-              {sizeInfo && <p className="text-xs text-primary">Foto comprimida: {sizeInfo}</p>}
-              <label>
-                Ou URL da foto
-                <input
-                  value={edit.image_url.startsWith("data:") ? "" : edit.image_url}
-                  onChange={(e) => setEdit({ ...edit, image_url: e.target.value })}
-                  placeholder="https://..."
-                />
-              </label>
               <label>
                 Descrição
                 <textarea

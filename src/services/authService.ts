@@ -43,6 +43,17 @@ export async function getAuthState(): Promise<AuthState> {
   };
 }
 
+export async function getAccessToken(): Promise<string | null> {
+  if (!isSupabaseConfigured || !supabase) {
+    return null;
+  }
+  const { data, error } = await supabase.auth.getSession();
+  if (error || !data.session?.access_token) {
+    return null;
+  }
+  return data.session.access_token;
+}
+
 export async function signInAdmin(email: string, password: string): Promise<AuthState> {
   const client = requireSupabase();
   const { data, error } = await client.auth.signInWithPassword({
