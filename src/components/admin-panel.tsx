@@ -464,7 +464,7 @@ export function AdminPanel() {
   return (
     <main className="min-h-screen bg-background">
       <header className="border-b">
-        <div className="shell h-[68px] md:h-20 flex items-center justify-between gap-3">
+        <div className="shell h-17 md:h-20 flex items-center justify-between gap-3">
           <img
             src="/logo.png"
             alt="Use Camile Acessórios"
@@ -551,9 +551,12 @@ export function AdminPanel() {
             </div>
             <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-4">
               <div className="relative">
-                <Search className="absolute left-3 top-3 text-muted-foreground" size={18} />
+                <Search
+                  className="pointer-events-none absolute top-1/2 left-3.5 -translate-y-1/2 text-muted-foreground"
+                  size={18}
+                />
                 <input
-                  className="pl-10"
+                  className="w-full pl-10!"
                   placeholder="Buscar por nome ou SKU"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
