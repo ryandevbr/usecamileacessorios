@@ -391,15 +391,18 @@ export function Storefront() {
             ))}
           </div>
           <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 mt-8 mb-6">
-            <div className="relative max-w-xs">
-              <Search size={16} className="absolute top-3 left-3 text-muted-foreground" />
+            <div className="relative w-full max-w-xs">
+              <Search
+                size={16}
+                className="pointer-events-none absolute top-1/2 left-3.5 -translate-y-1/2 text-muted-foreground"
+              />
               <input
                 id="search"
                 aria-label="Buscar por nome ou SKU"
                 placeholder="Qual peça você procura?"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                className="pl-10 border-0 bg-muted text-sm"
+                className="w-full pl-10! bg-muted text-sm"
               />
             </div>
             <select
