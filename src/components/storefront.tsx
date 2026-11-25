@@ -180,10 +180,12 @@ export function Storefront() {
       "Olá, Use Camile Acessórios! ✨",
       "Gostaria de finalizar meu pedido feito pelo site:",
       "",
-      ...cart.map(
-        (i) =>
-          `${i.product.name} (${i.product.material})${i.product.is_on_sale ? " (Promoção)" : ""} — Qtd: ${i.quantity} — ${money(priceOf(i.product) * i.quantity)}`,
-      ),
+      cart
+        .map(
+          (i) =>
+            `• *${i.product.name}* (${i.product.material})${i.product.is_on_sale ? " (Promoção)" : ""} — Qtd: ${i.quantity} — ${money(priceOf(i.product) * i.quantity)}`,
+        )
+        .join("\n\n"),
       "",
       `Subtotal: ${money(subtotal)}`,
       ...(discount
