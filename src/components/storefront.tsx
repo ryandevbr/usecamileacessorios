@@ -207,7 +207,7 @@ export function Storefront() {
         </div>
       )}
       <header className="sticky top-0 z-40 bg-background/95 backdrop-blur border-b border-border">
-        <div className="shell flex items-center justify-between gap-3 md:grid md:grid-cols-[1fr_auto_1fr] h-[68px] sm:h-[74px] md:h-20">
+        <div className="shell flex items-center justify-between gap-3 md:grid md:grid-cols-[1fr_auto_1fr] h-17 sm:h-18.5 md:h-20">
           <a
             href="#inicio"
             aria-label="Use Camile — início"
@@ -268,7 +268,7 @@ export function Storefront() {
           ))}
           <div className="hero-scrim pointer-events-none" />
           <div className="shell hero-content pointer-events-none">
-            <div className="max-w-[510px] pointer-events-auto">
+            <div className="max-w-127.5 pointer-events-auto">
               <p className="eyebrow text-muted-foreground flex gap-2 items-center mb-5">
                 <Sparkles size={15} className="text-primary" /> Delicadeza que faz a diferença
               </p>
@@ -278,7 +278,7 @@ export function Storefront() {
                 acessórios são a<br />
                 <em className="text-primary">alma do look!</em>
               </h1>
-              <p className="text-muted-foreground text-sm leading-7 mt-6 max-w-[395px]">
+              <p className="text-muted-foreground text-sm leading-7 mt-6 max-w-98.75">
                 Prata 925 e Semijoias selecionadas para realçar o seu estilo. Peças especiais, para
                 todos os seus momentos.
               </p>
@@ -396,7 +396,7 @@ export function Storefront() {
                   <div className="absolute top-3 left-3 flex flex-col gap-2 pointer-events-none">
                     {p.is_on_sale ? (
                       <span className="bg-primary text-primary-foreground px-2 py-1 text-[9px] uppercase tracking-wide">
-                        {p.sale_label || `${Math.round((1 - p.sale_price / p.price) * 100)}% OFF`}
+                        {p.sale_label || `${((1 - p.sale_price / p.price) * 100).toFixed(0)}% OFF`}
                       </span>
                     ) : p.featured ? (
                       <span className="bg-background/90 text-foreground px-2 py-1 text-[9px] uppercase tracking-wide">
@@ -609,7 +609,7 @@ export function Storefront() {
           target="_blank"
           rel="noreferrer"
         >
-          <MessageCircle className="!size-6" />
+          <MessageCircle className="size-6!" />
         </a>
       </Button>
       <Dialog open={!!product} onOpenChange={(v) => !v && open(null)}>
