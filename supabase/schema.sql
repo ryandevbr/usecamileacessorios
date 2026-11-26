@@ -372,3 +372,5 @@ create policy "Admin pode excluir imagens da loja"
   for delete
   to authenticated
   using (bucket_id = 'store-media');
+
+notify pgrst, 'reload schema';
