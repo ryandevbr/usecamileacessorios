@@ -22,7 +22,7 @@ import { optionLookupKey } from "@/services/catalogOptionsService";
 import { deleteStoreImage, uploadStoreImage } from "@/services/storageService";
 
 type BatchStep = 1 | 2 | 3;
-type BatchItemStatus = "queued" | "analyzing" | "uploading" | "done" | "failed";
+type BatchItemStatus = "queued" | "retrying_wait" | "analyzing" | "uploading" | "done" | "failed";
 
 interface BatchItem {
   id: string;
@@ -30,10 +30,18 @@ interface BatchItem {
   originalName: string;
   previewUrl: string;
   status: BatchItemStatus;
+  attempt?: number;
+  uploadedImageUrl?: string;
   error?: string;
   productName?: string;
   resolvedCategory?: string;
   resolvedMaterial?: string;
+}
+
+interface RetryCountdownState {
+  round: 2 | 3;
+  secondsLeft: number;
+  failedCount: number;
 }
 
 interface BatchImportDialogProps {
@@ -44,7 +52,12 @@ interface BatchImportDialogProps {
   saveProduct: (product: Product) => Promise<void>;
 }
 
-const BATCH_ITEM_DELAY_MS = 800;
+export const BATCH_MAX_ATTEMPTS = 3;
+export const BATCH_INITIAL_ITEM_DELAY_MS = 800;
+export const BATCH_RETRY_ROUNDS = [
+  { attempt: 2 as const, waitSeconds: 5, itemDelayMs: 1200 },
+  { attempt: 3 as const, waitSeconds: 8, itemDelayMs: 1500 },
+] as const;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -80,15 +93,19 @@ export function BatchImportDialog({
   const [items, setItems] = useState<BatchItem[]>([]);
   const [converting, setConverting] = useState<{ current: number; total: number } | null>(null);
   const [isRunning, setIsRunning] = useState<boolean>(false);
+  const [currentAttempt, setCurrentAttempt] = useState<number>(1);
+  const [retryCountdown, setRetryCountdown] = useState<RetryCountdownState | null>(null);
 
   const itemsRef = useRef<BatchItem[]>([]);
   const objectUrlsRef = useRef<Set<string>>(new Set());
   const cancelRequestedRef = useRef<boolean>(false);
   const mountedRef = useRef<boolean>(true);
 
-  useEffect(() => {
-    itemsRef.current = items;
-  }, [items]);
+  const commitItems = (updater: (prev: BatchItem[]) => BatchItem[]) => {
+    const next = updater(itemsRef.current);
+    itemsRef.current = next;
+    setItems(next);
+  };
 
   useEffect(() => {
     mountedRef.current = true;
@@ -96,6 +113,11 @@ export function BatchImportDialog({
     return () => {
       mountedRef.current = false;
       cancelRequestedRef.current = true;
+      for (const item of itemsRef.current) {
+        if (item.status !== "done" && item.uploadedImageUrl) {
+          void deleteStoreImage(item.uploadedImageUrl);
+        }
+      }
       for (const url of urls) {
         URL.revokeObjectURL(url);
       }
@@ -108,11 +130,17 @@ export function BatchImportDialog({
 
   const doneCount = items.filter((item) => item.status === "done").length;
   const failedCount = items.filter((item) => item.status === "failed").length;
+  const waitingRetryCount = items.filter((item) => item.status === "retrying_wait").length;
   const queuedCount = items.filter((item) => item.status === "queued").length;
-  const processedCount = doneCount + failedCount;
-  const progressPercent = items.length > 0 ? Math.round((processedCount / items.length) * 100) : 0;
+  const finalizedCount = doneCount + failedCount;
+  const progressPercent = items.length > 0 ? Math.round((finalizedCount / items.length) * 100) : 0;
 
   const clearAllItems = () => {
+    for (const item of itemsRef.current) {
+      if (item.status !== "done" && item.uploadedImageUrl) {
+        void deleteStoreImage(item.uploadedImageUrl);
+      }
+    }
     for (const url of objectUrlsRef.current) {
       URL.revokeObjectURL(url);
     }
@@ -130,13 +158,15 @@ export function BatchImportDialog({
     setAutoPublish(true);
     setConverting(null);
     setIsRunning(false);
+    setCurrentAttempt(1);
+    setRetryCountdown(null);
     clearAllItems();
   };
 
   const handleOpenChange = (nextOpen: boolean) => {
     if (!nextOpen) {
       if (isRunning || converting) {
-        toast.info("Aguarde ou pause a fila antes de fechar.");
+        toast.info("Aguarde o término do lote ou pause a fila antes de fechar.");
         return;
       }
       resetModal();
@@ -170,11 +200,7 @@ export function BatchImportDialog({
           previewUrl,
           status: "queued",
         };
-        setItems((prev) => {
-          const updated = [...prev, nextItem];
-          itemsRef.current = updated;
-          return updated;
-        });
+        commitItems((prev) => [...prev, nextItem]);
         addedCount += 1;
       } catch (err) {
         failedConversions += 1;
@@ -200,59 +226,66 @@ export function BatchImportDialog({
 
   const removeItem = (id: string) => {
     if (isRunning) return;
-    setItems((prev) => {
+    commitItems((prev) => {
       const target = prev.find((item) => item.id === id);
       if (target) {
+        if (target.status !== "done" && target.uploadedImageUrl) {
+          void deleteStoreImage(target.uploadedImageUrl);
+        }
         URL.revokeObjectURL(target.previewUrl);
         objectUrlsRef.current.delete(target.previewUrl);
       }
-      const updated = prev.filter((item) => item.id !== id);
-      itemsRef.current = updated;
-      return updated;
+      return prev.filter((item) => item.id !== id);
     });
   };
 
   const updateItem = (id: string, updater: (item: BatchItem) => BatchItem) => {
-    setItems((prev) => {
-      const updated = prev.map((item) => (item.id === id ? updater(item) : item));
-      itemsRef.current = updated;
-      return updated;
-    });
+    commitItems((prev) => prev.map((item) => (item.id === id ? updater(item) : item)));
   };
 
-  const runQueue = async (targetIds: string[]) => {
-    if (isRunning || targetIds.length === 0) return;
+  const sleepInterruptible = async (totalMs: number): Promise<boolean> => {
+    const stepMs = 200;
+    let elapsed = 0;
+    while (elapsed < totalMs) {
+      if (cancelRequestedRef.current || !mountedRef.current) {
+        return false;
+      }
+      const waitChunk = Math.min(stepMs, totalMs - elapsed);
+      await sleep(waitChunk);
+      elapsed += waitChunk;
+    }
+    return !cancelRequestedRef.current && mountedRef.current;
+  };
 
-    cancelRequestedRef.current = false;
-    setIsRunning(true);
+  const waitWithCountdown = async (
+    totalSeconds: number,
+    round: 2 | 3,
+    pendingFailCount: number,
+  ): Promise<boolean> => {
+    for (let remaining = totalSeconds; remaining > 0; remaining--) {
+      if (cancelRequestedRef.current || !mountedRef.current) {
+        setRetryCountdown(null);
+        return false;
+      }
+      setRetryCountdown({ round, secondsLeft: remaining, failedCount: pendingFailCount });
+      const completedSecond = await sleepInterruptible(1000);
+      if (!completedSecond) {
+        setRetryCountdown(null);
+        return false;
+      }
+    }
+    setRetryCountdown(null);
+    return !cancelRequestedRef.current && mountedRef.current;
+  };
 
-    const defaultCategory = categoryNames.includes("Brincos")
-      ? "Brincos"
-      : (categoryNames[0] ?? "Brincos");
-    const defaultMaterial = materialNames.includes("Semijoia")
-      ? "Semijoia"
-      : (materialNames[0] ?? "Semijoia");
-
-    // Reset target items back to queued before processing
-    const targetSet = new Set(targetIds);
-    setItems((prev) => {
-      const updated = prev.map((item) =>
-        targetSet.has(item.id)
-          ? {
-              id: item.id,
-              file: item.file,
-              originalName: item.originalName,
-              previewUrl: item.previewUrl,
-              status: "queued" as const,
-            }
-          : item,
-      );
-      itemsRef.current = updated;
-      return updated;
-    });
-
-    let batchDone = 0;
-    let batchFailed = 0;
+  const processPass = async (
+    targetIds: string[],
+    attempt: number,
+    itemDelayMs: number,
+    defaultCategory: string,
+    defaultMaterial: string,
+  ): Promise<string[]> => {
+    const failedInPass: string[] = [];
 
     for (let i = 0; i < targetIds.length; i++) {
       if (cancelRequestedRef.current || !mountedRef.current) break;
@@ -260,17 +293,20 @@ export function BatchImportDialog({
       if (!itemId) continue;
 
       const currentItem = itemsRef.current.find((item) => item.id === itemId);
-      if (!currentItem) continue;
+      // Nunca reprocessa nem duplica itens já publicados em passagens anteriores.
+      if (!currentItem || currentItem.status === "done") continue;
 
       updateItem(itemId, (item) => ({
         id: item.id,
         file: item.file,
         originalName: item.originalName,
         previewUrl: item.previewUrl,
+        ...(item.uploadedImageUrl ? { uploadedImageUrl: item.uploadedImageUrl } : {}),
+        attempt,
         status: "analyzing",
       }));
 
-      let uploadedImageUrl = "";
+      let persistedImageUrl = currentItem.uploadedImageUrl ?? "";
       try {
         const analysis = await analyzeProductWithAi({
           file: currentItem.file,
@@ -296,14 +332,23 @@ export function BatchImportDialog({
 
         updateItem(itemId, (item) => ({
           ...item,
+          attempt,
           status: "uploading",
           productName: resolvedName,
           resolvedCategory,
           resolvedMaterial,
         }));
 
-        const uploaded = await uploadStoreImage(currentItem.file, "products");
-        uploadedImageUrl = uploaded.url;
+        if (!persistedImageUrl) {
+          const uploaded = await uploadStoreImage(currentItem.file, "products");
+          persistedImageUrl = uploaded.url;
+          if (mountedRef.current) {
+            updateItem(itemId, (item) => ({
+              ...item,
+              uploadedImageUrl: persistedImageUrl,
+            }));
+          }
+        }
 
         const productToCreate: Product = {
           id: crypto.randomUUID(),
@@ -315,7 +360,7 @@ export function BatchImportDialog({
           sale_price: 0,
           is_on_sale: false,
           sale_label: "",
-          image_url: uploaded.url,
+          image_url: persistedImageUrl,
           description: analysis.description.trim(),
           active: autoPublish,
           featured: false,
@@ -324,50 +369,149 @@ export function BatchImportDialog({
         };
 
         await saveProduct(productToCreate);
-        uploadedImageUrl = "";
 
         if (!mountedRef.current) break;
         updateItem(itemId, (item) => ({
-          ...item,
+          id: item.id,
+          file: item.file,
+          originalName: item.originalName,
+          previewUrl: item.previewUrl,
+          attempt,
           status: "done",
           productName: resolvedName,
           resolvedCategory,
           resolvedMaterial,
         }));
-        batchDone += 1;
       } catch (err) {
-        if (uploadedImageUrl) {
-          void deleteStoreImage(uploadedImageUrl);
-        }
         const message =
           err instanceof Error ? err.message : "Erro inesperado ao importar esta peça.";
         if (!mountedRef.current) break;
         updateItem(itemId, (item) => ({
           ...item,
+          ...(persistedImageUrl ? { uploadedImageUrl: persistedImageUrl } : {}),
+          attempt,
           status: "failed",
           error: message,
         }));
-        batchFailed += 1;
+        failedInPass.push(itemId);
       }
 
       if (i < targetIds.length - 1 && !cancelRequestedRef.current && mountedRef.current) {
-        await sleep(BATCH_ITEM_DELAY_MS);
+        await sleepInterruptible(itemDelayMs);
       }
     }
 
+    return failedInPass;
+  };
+
+  const runQueue = async (targetIds: string[]) => {
+    if (isRunning || targetIds.length === 0) return;
+
+    const runnableIds = targetIds.filter((id) => {
+      const found = itemsRef.current.find((item) => item.id === id);
+      return found && found.status !== "done";
+    });
+    if (runnableIds.length === 0) return;
+
+    cancelRequestedRef.current = false;
+    setIsRunning(true);
+    setRetryCountdown(null);
+    setCurrentAttempt(1);
+
+    const defaultCategory = categoryNames.includes("Brincos")
+      ? "Brincos"
+      : (categoryNames[0] ?? "Brincos");
+    const defaultMaterial = materialNames.includes("Semijoia")
+      ? "Semijoia"
+      : (materialNames[0] ?? "Semijoia");
+
+    // Prepara os itens alvo para a 1ª passagem preservando eventual imagem já enviada
+    const targetSet = new Set(runnableIds);
+    commitItems((prev) =>
+      prev.map((item) =>
+        targetSet.has(item.id)
+          ? {
+              id: item.id,
+              file: item.file,
+              originalName: item.originalName,
+              previewUrl: item.previewUrl,
+              ...(item.uploadedImageUrl ? { uploadedImageUrl: item.uploadedImageUrl } : {}),
+              status: "queued" as const,
+            }
+          : item,
+      ),
+    );
+
+    // Passagem 1 (normal: 800ms entre itens)
+    let pendingFailures = await processPass(
+      runnableIds,
+      1,
+      BATCH_INITIAL_ITEM_DELAY_MS,
+      defaultCategory,
+      defaultMaterial,
+    );
+
+    // Até 2 rodadas automáticas de repescagem (tentativas 2/3 e 3/3)
+    for (const round of BATCH_RETRY_ROUNDS) {
+      if (pendingFailures.length === 0 || cancelRequestedRef.current || !mountedRef.current) {
+        break;
+      }
+
+      const retrySet = new Set(pendingFailures);
+      commitItems((prev) =>
+        prev.map((item) =>
+          retrySet.has(item.id) && item.status !== "done"
+            ? { ...item, status: "retrying_wait" as const }
+            : item,
+        ),
+      );
+
+      const shouldContinue = await waitWithCountdown(
+        round.waitSeconds,
+        round.attempt,
+        pendingFailures.length,
+      );
+      if (!shouldContinue) {
+        break;
+      }
+
+      setCurrentAttempt(round.attempt);
+      pendingFailures = await processPass(
+        pendingFailures,
+        round.attempt,
+        round.itemDelayMs,
+        defaultCategory,
+        defaultMaterial,
+      );
+    }
+
     if (mountedRef.current) {
+      setRetryCountdown(null);
+      // Garante que nenhum card fique preso em "Aguardando repescagem..." se a fila foi pausada
+      commitItems((prev) =>
+        prev.some((item) => item.status === "retrying_wait")
+          ? prev.map((item) =>
+              item.status === "retrying_wait" ? { ...item, status: "failed" as const } : item,
+            )
+          : prev,
+      );
+
       setIsRunning(false);
+
+      const totalDone = itemsRef.current.filter((item) => item.status === "done").length;
+      const totalFailed = itemsRef.current.filter((item) => item.status === "failed").length;
+
       if (cancelRequestedRef.current) {
-        toast.info("Fila pausada. Você pode continuar quando desejar.");
-      } else if (batchFailed === 0 && batchDone > 0) {
+        toast.info("Fila pausada. Você pode continuar ou reprocessar as falhas quando desejar.");
+      } else if (totalFailed === 0 && totalDone > 0) {
         toast.success(
-          batchDone === 1
+          totalDone === 1
             ? "1 produto importado com sucesso!"
-            : `${batchDone} produtos importados com sucesso!`,
+            : `${totalDone} produtos importados com sucesso!`,
         );
-      } else if (batchFailed > 0) {
+      } else if (totalFailed > 0) {
         toast.error(
-          `${batchDone} importado(s) e ${batchFailed} com falha. Você pode reprocessar as falhas abaixo.`,
+          `${totalDone} importado(s) e ${totalFailed} com falha após ${BATCH_MAX_ATTEMPTS} tentativas. Use "Reprocessar falhas" se desejar tentar novamente.`,
         );
       }
     }
@@ -411,11 +555,20 @@ export function BatchImportDialog({
             Na fila
           </span>
         );
+      case "retrying_wait":
+        return (
+          <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/12 px-2.5 py-1 text-[11px] font-medium text-amber-800">
+            <Clock size={12} />
+            Aguardando repescagem...
+          </span>
+        );
       case "analyzing":
         return (
           <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary">
             <Loader2 size={12} className="animate-spin" />
-            Analisando...
+            {item.attempt && item.attempt > 1
+              ? `Analisando (${item.attempt}/${BATCH_MAX_ATTEMPTS})...`
+              : "Analisando..."}
           </span>
         );
       case "uploading":
@@ -441,6 +594,12 @@ export function BatchImportDialog({
         );
     }
   };
+
+  const countdownMessage = retryCountdown
+    ? retryCountdown.round === 2
+      ? `A IA estava ocupada em ${retryCountdown.failedCount} foto(s). Aguardando ${retryCountdown.secondsLeft}s para tentar novamente automaticamente...`
+      : `Aguardando ${retryCountdown.secondsLeft}s para última tentativa automática em ${retryCountdown.failedCount} foto(s)...`
+    : null;
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -634,13 +793,15 @@ export function BatchImportDialog({
           {step === 3 && (
             <div className="space-y-4">
               <div className="rounded-lg border bg-muted/35 p-4 space-y-2.5">
-                <div className="flex items-center justify-between text-xs">
+                <div className="flex items-center justify-between text-xs gap-2">
                   <span className="font-medium text-foreground">
                     {isRunning
-                      ? `Processando fila (${processedCount} de ${items.length})...`
-                      : `Processamento finalizado (${processedCount} de ${items.length})`}
+                      ? currentAttempt > 1
+                        ? `Repescagem automática (${currentAttempt}/${BATCH_MAX_ATTEMPTS}) · ${doneCount} de ${items.length} publicados`
+                        : `Processando fila (${finalizedCount} de ${items.length})...`
+                      : `Processamento finalizado (${doneCount} de ${items.length} publicados)`}
                   </span>
-                  <span className="font-semibold text-primary">{progressPercent}%</span>
+                  <span className="font-semibold text-primary shrink-0">{progressPercent}%</span>
                 </div>
                 <div className="h-2.5 w-full overflow-hidden rounded-full bg-border">
                   <div
@@ -651,9 +812,21 @@ export function BatchImportDialog({
                 <div className="flex flex-wrap gap-3 text-[11px] text-muted-foreground">
                   <span>Publicados: {doneCount}</span>
                   <span>Falhas: {failedCount}</span>
+                  {waitingRetryCount > 0 && <span>Repescagem: {waitingRetryCount}</span>}
                   <span>Na fila: {queuedCount}</span>
                 </div>
               </div>
+
+              {countdownMessage && (
+                <div
+                  role="status"
+                  aria-live="polite"
+                  className="flex items-center gap-2.5 rounded-lg border border-primary/25 bg-primary/8 px-4 py-3 text-xs text-foreground"
+                >
+                  <Loader2 size={15} className="animate-spin text-primary shrink-0" />
+                  <span>{countdownMessage}</span>
+                </div>
+              )}
 
               <div className="divide-y rounded-lg border">
                 {items.map((item) => (
@@ -775,7 +948,7 @@ export function BatchImportDialog({
                 )}
               </div>
               <Button type="button" disabled={isRunning} onClick={() => handleOpenChange(false)}>
-                {isRunning ? "Processando..." : "Concluir"}
+                {isRunning ? "Processando lote..." : "Concluir"}
               </Button>
             </>
           )}
