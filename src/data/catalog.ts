@@ -1,16 +1,3 @@
-import p1 from "@/assets/product-1.asset.json";
-import p2 from "@/assets/product-2.asset.json";
-import p3 from "@/assets/product-3.asset.json";
-import p4 from "@/assets/product-4.asset.json";
-import p5 from "@/assets/product-5.asset.json";
-import p6 from "@/assets/product-6.asset.json";
-import p7 from "@/assets/product-7.asset.json";
-import p8 from "@/assets/product-8.asset.json";
-import p9 from "@/assets/product-9.asset.json";
-import p10 from "@/assets/product-10.asset.json";
-import p11 from "@/assets/product-11.asset.json";
-import p12 from "@/assets/product-12.asset.json";
-import editorial from "@/assets/editorial.asset.json";
 export interface ProductCharacteristic {
   attribute: string;
   value: string;
@@ -56,6 +43,30 @@ export interface StoreAnnouncement {
   text: string;
   link: string;
 }
+export type PromoCtaType = "vitrine" | "whatsapp";
+export interface StorePromotion {
+  promo_active: boolean;
+  promo_badge: string;
+  promo_title: string;
+  promo_description: string;
+  promo_highlight: string;
+  promo_cta_label: string;
+  promo_cta_type: PromoCtaType;
+}
+export interface StoreSettings extends StorePromotion {
+  announcement_active: boolean;
+  announcement_text: string;
+  announcement_link: string;
+}
+export const defaultPromotion: StorePromotion = {
+  promo_active: false,
+  promo_badge: "CAMPANHA ESPECIAL",
+  promo_title: "",
+  promo_description: "",
+  promo_highlight: "",
+  promo_cta_label: "Aproveitar promoção",
+  promo_cta_type: "vitrine",
+};
 export interface AdminProfile {
   name: string;
   email: string;
@@ -66,6 +77,7 @@ export interface StoreData {
   coupons: Coupon[];
   banners: Banner[];
   announcement: StoreAnnouncement;
+  promotion: StorePromotion;
   profile: AdminProfile;
 }
 export const emptyStoreData: StoreData = {
@@ -73,6 +85,7 @@ export const emptyStoreData: StoreData = {
   coupons: [],
   banners: [],
   announcement: { active: false, text: "", link: "#vitrine" },
+  promotion: { ...defaultPromotion },
   profile: { name: "Administradora", email: "", avatar: "" },
 };
 const names = [
@@ -104,7 +117,6 @@ const categories = [
   "Colares",
 ];
 const prices = [69.9, 89.9, 119.9, 99.9, 149.9, 59.9, 79.9, 89.9, 39.9, 69.9, 189.9, 99.9];
-const photos = [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12];
 export const initialData: StoreData = {
   products: names.map((name, i) => ({
     id: `camile-${i + 1}`,
@@ -116,7 +128,7 @@ export const initialData: StoreData = {
     sale_price: Number(((prices[i] ?? 69.9) * 0.8).toFixed(2)),
     is_on_sale: [0, 4, 10].includes(i),
     sale_label: "",
-    image_url: photos[i]?.url ?? p1.url,
+    image_url: "/logo.png",
     description:
       "Um toque de delicadeza para acompanhar seus melhores momentos. Uma peça selecionada com carinho, perfeita para compor looks e presentear alguém especial.",
     active: true,
@@ -156,22 +168,22 @@ export const initialData: StoreData = {
   banners: [
     {
       id: "b1",
-      image_url: editorial.url,
-      alt: "Colares delicados e anéis dourados em uma composição editorial",
+      image_url: "/logo.png",
+      alt: "Banner Use Camile Acessórios",
       active: true,
       filter: "",
     },
     {
       id: "b2",
-      image_url: p11.url,
-      alt: "Conjunto de pérolas dourado",
+      image_url: "/logo.png",
+      alt: "Banner Use Camile Acessórios",
       active: true,
       filter: "Semijoias",
     },
     {
       id: "b3",
-      image_url: p2.url,
-      alt: "Colar coração em Prata 925",
+      image_url: "/logo.png",
+      alt: "Banner Use Camile Acessórios",
       active: true,
       filter: "Prata 925",
     },
@@ -181,6 +193,7 @@ export const initialData: StoreData = {
     text: "Sua primeira compra merece um brilho extra: 10% OFF com PRIMEIRACOMPRA",
     link: "#vitrine",
   },
+  promotion: { ...defaultPromotion },
   profile: { name: "Administradora", email: "", avatar: "" },
 };
 export const DEFAULT_CATEGORIES = [

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  defaultPromotion,
   emptyStoreData,
   initialData,
   type AdminProfile,
@@ -9,6 +10,7 @@ import {
   type ProductCharacteristic,
   type StoreAnnouncement,
   type StoreData,
+  type StorePromotion,
 } from "@/data/catalog";
 import { isSupabaseConfigured, requireSupabase, supabase } from "@/lib/supabase";
 import { normalizeCode } from "@/services/couponService";
@@ -53,6 +55,29 @@ interface StoreSettingsRow {
   announcement_active: boolean;
   announcement_text: string | null;
   announcement_link: string | null;
+  promo_active?: boolean | null;
+  promo_badge?: string | null;
+  promo_title?: string | null;
+  promo_description?: string | null;
+  promo_highlight?: string | null;
+  promo_cta_label?: string | null;
+  promo_cta_type?: string | null;
+}
+
+const STORE_SETTINGS_COLUMNS =
+  "id, announcement_active, announcement_text, announcement_link, promo_active, promo_badge, promo_title, promo_description, promo_highlight, promo_cta_label, promo_cta_type";
+
+function mapPromotionRow(row: StoreSettingsRow | null): StorePromotion {
+  if (!row) return { ...defaultPromotion };
+  return {
+    promo_active: Boolean(row.promo_active),
+    promo_badge: row.promo_badge?.trim() || defaultPromotion.promo_badge,
+    promo_title: row.promo_title ?? "",
+    promo_description: row.promo_description ?? "",
+    promo_highlight: row.promo_highlight ?? "",
+    promo_cta_label: row.promo_cta_label?.trim() || defaultPromotion.promo_cta_label,
+    promo_cta_type: row.promo_cta_type === "whatsapp" ? "whatsapp" : "vitrine",
+  };
 }
 
 interface CouponRow {
@@ -191,7 +216,25 @@ function notifyStoreChanged() {
 export function loadStore(): StoreData {
   try {
     const raw = localStorage.getItem(KEY);
-    return raw ? { ...initialData, ...JSON.parse(raw) } : structuredClone(initialData);
+    if (!raw) return structuredClone(initialData);
+    const parsed = JSON.parse(raw) as Partial<StoreData>;
+    return {
+      ...structuredClone(initialData),
+      ...parsed,
+      announcement: {
+        ...initialData.announcement,
+        ...(parsed.announcement ?? {}),
+      },
+      promotion: {
+        ...defaultPromotion,
+        ...(parsed.promotion ?? {}),
+        promo_cta_type: parsed.promotion?.promo_cta_type === "whatsapp" ? "whatsapp" : "vitrine",
+      },
+      profile: {
+        ...initialData.profile,
+        ...(parsed.profile ?? {}),
+      },
+    };
   } catch {
     return structuredClone(initialData);
   }
@@ -234,7 +277,7 @@ export async function fetchStoreData(scope: StoreScope = "public"): Promise<Stor
 
   const settingsQuery = supabase
     .from("store_settings")
-    .select("id, announcement_active, announcement_text, announcement_link")
+    .select(STORE_SETTINGS_COLUMNS)
     .eq("id", 1)
     .maybeSingle();
 
@@ -274,11 +317,23 @@ export async function fetchStoreData(scope: StoreScope = "public"): Promise<Stor
   if (couponsRes.error) {
     throw new Error(`Erro ao carregar cupons: ${couponsRes.error.message}`);
   }
+  let settingsRow = settingsRes.data as StoreSettingsRow | null;
   if (settingsRes.error) {
-    throw new Error(`Erro ao carregar configurações: ${settingsRes.error.message}`);
+    if (settingsRes.error.code === "42703" || settingsRes.error.message.includes("promo_")) {
+      const fallbackSettingsRes = await supabase
+        .from("store_settings")
+        .select("id, announcement_active, announcement_text, announcement_link")
+        .eq("id", 1)
+        .maybeSingle();
+      if (fallbackSettingsRes.error) {
+        throw new Error(`Erro ao carregar configurações: ${fallbackSettingsRes.error.message}`);
+      }
+      settingsRow = fallbackSettingsRes.data as StoreSettingsRow | null;
+    } else {
+      throw new Error(`Erro ao carregar configurações: ${settingsRes.error.message}`);
+    }
   }
 
-  const settingsRow = settingsRes.data as StoreSettingsRow | null;
   const announcement: StoreAnnouncement = settingsRow
     ? {
         active: Boolean(settingsRow.announcement_active),
@@ -286,6 +341,7 @@ export async function fetchStoreData(scope: StoreScope = "public"): Promise<Stor
         link: settingsRow.announcement_link ?? "#vitrine",
       }
     : { ...emptyStoreData.announcement };
+  const promotion: StorePromotion = mapPromotionRow(settingsRow);
 
   let profile: AdminProfile = { ...emptyStoreData.profile };
   if (scope === "admin") {
@@ -316,6 +372,7 @@ export async function fetchStoreData(scope: StoreScope = "public"): Promise<Stor
     banners: bannersRows.map(mapBannerRow),
     coupons: ((couponsRes.data ?? []) as CouponRow[]).map(mapCouponRow),
     announcement,
+    promotion,
     profile,
   };
 }
@@ -455,6 +512,32 @@ export async function saveStoreAnnouncement(
     text: row.announcement_text ?? "",
     link: row.announcement_link ?? "#vitrine",
   };
+}
+
+export async function saveStorePromotion(promotion: StorePromotion): Promise<StorePromotion> {
+  const client = requireSupabase();
+  const payload = {
+    id: 1,
+    promo_active: Boolean(promotion.promo_active),
+    promo_badge: promotion.promo_badge.trim() || defaultPromotion.promo_badge,
+    promo_title: promotion.promo_title.trim(),
+    promo_description: promotion.promo_description.trim(),
+    promo_highlight: promotion.promo_highlight.trim(),
+    promo_cta_label: promotion.promo_cta_label.trim() || defaultPromotion.promo_cta_label,
+    promo_cta_type: promotion.promo_cta_type === "whatsapp" ? "whatsapp" : "vitrine",
+  };
+
+  const { data, error } = await client
+    .from("store_settings")
+    .upsert(payload, { onConflict: "id" })
+    .select(STORE_SETTINGS_COLUMNS)
+    .single();
+
+  if (error || !data) {
+    throw new Error(`Erro ao salvar espaço de promoções: ${error?.message ?? "resposta vazia"}`);
+  }
+
+  return mapPromotionRow(data as StoreSettingsRow);
 }
 
 export async function upsertCoupon(coupon: Coupon): Promise<Coupon> {
@@ -787,6 +870,32 @@ export function useStore(options?: { scope?: StoreScope; enabled?: boolean }) {
     [data],
   );
 
+  const savePromotion = useCallback(
+    async (promotion: StorePromotion) => {
+      const normalized: StorePromotion = {
+        promo_active: Boolean(promotion.promo_active),
+        promo_badge: promotion.promo_badge.trim() || defaultPromotion.promo_badge,
+        promo_title: promotion.promo_title.trim(),
+        promo_description: promotion.promo_description.trim(),
+        promo_highlight: promotion.promo_highlight.trim(),
+        promo_cta_label: promotion.promo_cta_label.trim() || defaultPromotion.promo_cta_label,
+        promo_cta_type: promotion.promo_cta_type === "whatsapp" ? "whatsapp" : "vitrine",
+      };
+
+      if (!isSupabaseConfigured) {
+        const next: StoreData = { ...data, promotion: normalized };
+        saveStore(next);
+        setData(next);
+        return;
+      }
+
+      const saved = await saveStorePromotion(normalized);
+      setData((prev) => ({ ...prev, promotion: saved }));
+      notifyStoreChanged();
+    },
+    [data],
+  );
+
   const saveCoupon = useCallback(
     async (coupon: Coupon) => {
       const normalized = { ...coupon, code: normalizeCode(coupon.code) };
@@ -873,6 +982,7 @@ export function useStore(options?: { scope?: StoreScope; enabled?: boolean }) {
     reorderBanners,
     deleteBanner,
     saveAnnouncement,
+    savePromotion,
     saveCoupon,
     deleteCoupon,
     saveProfile,

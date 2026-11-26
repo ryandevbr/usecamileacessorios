@@ -59,12 +59,21 @@ create table if not exists public.hero_banners (
   updated_at timestamptz not null default now()
 );
 
--- Configurações públicas da loja e barra de avisos (registro único id = 1)
+-- Configurações públicas da loja, barra de avisos e espaço de promoções (registro único id = 1)
 create table if not exists public.store_settings (
   id integer primary key default 1 check (id = 1),
   announcement_active boolean not null default true,
   announcement_text text not null default '',
   announcement_link text not null default '#vitrine',
+  promo_active boolean not null default false,
+  promo_badge text not null default 'CAMPANHA ESPECIAL',
+  promo_title text not null default '',
+  promo_description text not null default '',
+  promo_highlight text not null default '',
+  promo_cta_label text not null default 'Aproveitar promoção',
+  promo_cta_type text not null default 'vitrine'
+    constraint store_settings_promo_cta_type_check
+    check (promo_cta_type in ('vitrine', 'whatsapp')),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

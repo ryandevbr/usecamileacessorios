@@ -15,11 +15,14 @@ import {
   SlidersHorizontal,
   Sparkles,
   Loader2,
+  Gift,
+  EyeOff,
   X,
   Save,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { useStore } from "@/services/storeService";
 import {
@@ -43,6 +46,7 @@ import {
   type Coupon,
   type Banner,
   type StoreAnnouncement,
+  type StorePromotion,
 } from "@/data/catalog";
 import { normalizeCode } from "@/services/couponService";
 
@@ -67,6 +71,7 @@ export function AdminPanel() {
     reorderBanners,
     deleteBanner,
     saveAnnouncement,
+    savePromotion,
     saveCoupon,
     deleteCoupon,
     saveProfile,
@@ -109,6 +114,7 @@ export function AdminPanel() {
   const [manageMaterialInput, setManageMaterialInput] = useState("");
   const [removingOptionId, setRemovingOptionId] = useState<string | null>(null);
   const [announcementDraft, setAnnouncementDraft] = useState<StoreAnnouncement>(data.announcement);
+  const [promoDraft, setPromoDraft] = useState<StorePromotion>(data.promotion);
   const [profileDraft, setProfileDraft] = useState<AdminProfile>(data.profile);
   const pendingUploadsRef = useRef<string[]>([]);
   const lastProductFileRef = useRef<File | null>(null);
@@ -128,6 +134,10 @@ export function AdminPanel() {
   useEffect(() => {
     setAnnouncementDraft(data.announcement);
   }, [data.announcement]);
+
+  useEffect(() => {
+    setPromoDraft(data.promotion);
+  }, [data.promotion]);
 
   useEffect(() => {
     setProfileDraft(data.profile);
@@ -783,6 +793,159 @@ export function AdminPanel() {
                 <Save />
                 {saving ? "Salvando..." : "Salvar aviso"}
               </Button>
+            </div>
+            <div className="mt-10 max-w-2xl rounded-xl border bg-muted/35 p-5 sm:p-6 space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-4">
+                <div className="flex items-center gap-2.5">
+                  <Gift size={18} className="text-primary shrink-0" />
+                  <div>
+                    <h2 className="text-2xl sm:text-3xl leading-none">
+                      Espaço de Promoções na Vitrine
+                    </h2>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Bloco promocional exibido entre o banner principal e a vitrine.
+                    </p>
+                  </div>
+                </div>
+                <span
+                  className={`inline-flex items-center rounded-full px-3 py-1 text-[11px] font-medium border ${
+                    promoDraft.promo_active
+                      ? "bg-[#C91E7C]/10 text-[#C91E7C] border-[#C91E7C]/25"
+                      : "bg-muted text-muted-foreground border-border"
+                  }`}
+                >
+                  {promoDraft.promo_active ? "Ativo na vitrine" : "Oculto"}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-4 rounded-lg border bg-background px-4 py-3">
+                <label
+                  htmlFor="promo-active-switch"
+                  className="text-sm font-medium text-foreground cursor-pointer"
+                >
+                  Exibir espaço de promoções no site
+                </label>
+                <Switch
+                  id="promo-active-switch"
+                  checked={promoDraft.promo_active}
+                  onCheckedChange={(checked) =>
+                    setPromoDraft({ ...promoDraft, promo_active: checked })
+                  }
+                />
+              </div>
+              <div className="grid gap-4">
+                <label>
+                  Selo superior
+                  <input
+                    placeholder="Ex.: CAMPANHA ESPECIAL, SEMANA DO CLIENTE"
+                    value={promoDraft.promo_badge}
+                    onChange={(e) => setPromoDraft({ ...promoDraft, promo_badge: e.target.value })}
+                  />
+                </label>
+                <label>
+                  Título da promoção
+                  <input
+                    placeholder="Ex.: Ganhe um brinde exclusivo nas compras acima de R$ 150"
+                    value={promoDraft.promo_title}
+                    onChange={(e) => setPromoDraft({ ...promoDraft, promo_title: e.target.value })}
+                  />
+                </label>
+                <label>
+                  Descrição / Regras
+                  <textarea
+                    rows={4}
+                    placeholder="Explique como funciona a promoção, condições ou prazos..."
+                    value={promoDraft.promo_description}
+                    onChange={(e) =>
+                      setPromoDraft({ ...promoDraft, promo_description: e.target.value })
+                    }
+                  />
+                </label>
+                <label>
+                  Destaque / Condição extra (opcional)
+                  <input
+                    placeholder="Ex.: Válido enquanto durarem os estoques ou comprando com uma amiga"
+                    value={promoDraft.promo_highlight}
+                    onChange={(e) =>
+                      setPromoDraft({ ...promoDraft, promo_highlight: e.target.value })
+                    }
+                  />
+                </label>
+                <div className="field-grid">
+                  <label>
+                    Texto do botão
+                    <input
+                      placeholder="Ex.: Escolher minhas peças"
+                      value={promoDraft.promo_cta_label}
+                      onChange={(e) =>
+                        setPromoDraft({ ...promoDraft, promo_cta_label: e.target.value })
+                      }
+                    />
+                  </label>
+                  <label>
+                    Ação ao clicar no botão
+                    <select
+                      value={promoDraft.promo_cta_type}
+                      onChange={(e) =>
+                        setPromoDraft({
+                          ...promoDraft,
+                          promo_cta_type: e.target.value === "whatsapp" ? "whatsapp" : "vitrine",
+                        })
+                      }
+                    >
+                      <option value="vitrine">Rolar para a vitrine (#vitrine)</option>
+                      <option value="whatsapp">Abrir WhatsApp da loja</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-3 pt-1">
+                <Button
+                  type="button"
+                  disabled={saving}
+                  onClick={async () => {
+                    if (promoDraft.promo_active && !promoDraft.promo_title.trim()) {
+                      toast.error("Informe o título da promoção para exibi-la na vitrine.");
+                      return;
+                    }
+                    setSaving(true);
+                    try {
+                      await savePromotion(promoDraft);
+                      toast.success("Promoção salva!");
+                    } catch (err) {
+                      toast.error(err instanceof Error ? err.message : "Erro ao salvar promoção.");
+                    } finally {
+                      setSaving(false);
+                    }
+                  }}
+                >
+                  <Save />
+                  {saving ? "Salvando..." : "Salvar promoção"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="text-xs text-muted-foreground hover:text-foreground"
+                  disabled={saving || (!promoDraft.promo_active && !data.promotion.promo_active)}
+                  onClick={async () => {
+                    const hiddenDraft: StorePromotion = { ...promoDraft, promo_active: false };
+                    setPromoDraft(hiddenDraft);
+                    setSaving(true);
+                    try {
+                      await savePromotion(hiddenDraft);
+                      toast.success("Espaço de promoções ocultado da vitrine.");
+                    } catch (err) {
+                      toast.error(
+                        err instanceof Error ? err.message : "Erro ao desativar promoção.",
+                      );
+                    } finally {
+                      setSaving(false);
+                    }
+                  }}
+                >
+                  <EyeOff size={14} />
+                  Desativar e ocultar espaço
+                </Button>
+              </div>
             </div>
             <div className="flex justify-between items-center mt-12 mb-6">
               <h2 className="text-3xl">Fotos de destaque</h2>

@@ -17,6 +17,7 @@ import {
   Check,
   CreditCard,
   Heart,
+  Gift,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -149,6 +150,11 @@ export function Storefront() {
   const visibleProducts = filteredProducts.slice(0, visibleCount);
   const remainingCount = Math.max(0, filteredProducts.length - visibleCount);
   const nextBatchCount = Math.min(PRODUCTS_PER_PAGE, remainingCount);
+  const promotion = data.promotion;
+  const showPromotion = promotion.promo_active && promotion.promo_title.trim() !== "";
+  const promoWhatsappUrl = `${storeContent.whatsapp}?text=${encodeURIComponent(
+    `Olá, Use Camile Acessórios! Vi a promoção '${promotion.promo_title.trim()}' no site e gostaria de aproveitar ✨`,
+  )}`;
   const coupon = data.coupons.find((c) => c.code === applied);
   const totals = calculateCoupon(cart, coupon);
   const subtotal = cart.reduce((s, i) => s + priceOf(i.product) * i.quantity, 0);
@@ -369,6 +375,58 @@ export function Storefront() {
             })}
           </div>
         </div>
+        {showPromotion && (
+          <section id="promocoes" className="shell pt-10 md:pt-12">
+            <div className="relative overflow-hidden rounded-2xl border border-[#C91E7C]/20 bg-linear-to-br from-[#FAF8FB] via-[#FAF8FB] to-[#EAE1EB]/75 px-6 py-8 sm:px-10 sm:py-10 md:px-14 md:py-12 text-center shadow-xs">
+              {promotion.promo_badge.trim() && (
+                <p className="inline-flex items-center gap-2 rounded-full bg-[#C91E7C]/10 px-3.5 py-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#C91E7C]">
+                  <Gift size={13} />
+                  {promotion.promo_badge.trim()}
+                </p>
+              )}
+              <h2 className="font-display text-3xl sm:text-4xl md:text-[42px] leading-[1.12] text-[#3D3533] mt-4 max-w-3xl mx-auto">
+                {promotion.promo_title.trim()}
+              </h2>
+              {promotion.promo_description.trim() && (
+                <p className="whitespace-pre-line text-sm sm:text-[15px] leading-7 text-[#5C514E] mt-4 max-w-2xl mx-auto">
+                  {promotion.promo_description.trim()}
+                </p>
+              )}
+              {promotion.promo_highlight.trim() && (
+                <div className="mt-6 inline-flex max-w-2xl items-center justify-center gap-2.5 rounded-xl border border-[#C91E7C]/20 bg-white/85 px-4 py-3 text-left sm:text-center text-xs sm:text-sm text-[#3D3533] shadow-2xs">
+                  <Sparkles size={15} className="text-[#C91E7C] shrink-0" />
+                  <span className="whitespace-pre-line">{promotion.promo_highlight.trim()}</span>
+                </div>
+              )}
+              <div className="mt-7 flex justify-center">
+                {promotion.promo_cta_type === "whatsapp" ? (
+                  <Button
+                    size="lg"
+                    className="min-h-11 rounded-full bg-[#C91E7C] px-8 text-white hover:bg-[#a81867]"
+                    asChild
+                  >
+                    <a href={promoWhatsappUrl} target="_blank" rel="noopener noreferrer">
+                      <MessageCircle />
+                      {promotion.promo_cta_label.trim() || "Aproveitar promoção"}
+                    </a>
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    size="lg"
+                    className="min-h-11 rounded-full bg-[#C91E7C] px-8 text-white hover:bg-[#a81867]"
+                    onClick={() =>
+                      document.getElementById("vitrine")?.scrollIntoView({ behavior: "smooth" })
+                    }
+                  >
+                    {promotion.promo_cta_label.trim() || "Aproveitar promoção"}
+                    <ArrowRight />
+                  </Button>
+                )}
+              </div>
+            </div>
+          </section>
+        )}
         <section id="vitrine" className="shell pt-16 pb-20">
           <div className="text-center">
             <p className="eyebrow text-primary mb-3">Encontre seu próximo favorito</p>
