@@ -75,7 +75,7 @@ function mapPromotionRow(row: StoreSettingsRow | null): StorePromotion {
     promo_title: row.promo_title ?? "",
     promo_description: row.promo_description ?? "",
     promo_highlight: row.promo_highlight ?? "",
-    promo_cta_label: row.promo_cta_label?.trim() || defaultPromotion.promo_cta_label,
+    promo_cta_label: row.promo_cta_label ?? "",
     promo_cta_type: row.promo_cta_type === "whatsapp" ? "whatsapp" : "vitrine",
   };
 }
@@ -523,7 +523,7 @@ export async function saveStorePromotion(promotion: StorePromotion): Promise<Sto
     promo_title: promotion.promo_title.trim(),
     promo_description: promotion.promo_description.trim(),
     promo_highlight: promotion.promo_highlight.trim(),
-    promo_cta_label: promotion.promo_cta_label.trim() || defaultPromotion.promo_cta_label,
+    promo_cta_label: promotion.promo_cta_label.trim(),
     promo_cta_type: promotion.promo_cta_type === "whatsapp" ? "whatsapp" : "vitrine",
   };
 
@@ -878,7 +878,7 @@ export function useStore(options?: { scope?: StoreScope; enabled?: boolean }) {
         promo_title: promotion.promo_title.trim(),
         promo_description: promotion.promo_description.trim(),
         promo_highlight: promotion.promo_highlight.trim(),
-        promo_cta_label: promotion.promo_cta_label.trim() || defaultPromotion.promo_cta_label,
+        promo_cta_label: promotion.promo_cta_label.trim(),
         promo_cta_type: promotion.promo_cta_type === "whatsapp" ? "whatsapp" : "vitrine",
       };
 

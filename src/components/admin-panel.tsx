@@ -870,33 +870,6 @@ export function AdminPanel() {
                     }
                   />
                 </label>
-                <div className="field-grid">
-                  <label>
-                    Texto do botão
-                    <input
-                      placeholder="Ex.: Escolher minhas peças"
-                      value={promoDraft.promo_cta_label}
-                      onChange={(e) =>
-                        setPromoDraft({ ...promoDraft, promo_cta_label: e.target.value })
-                      }
-                    />
-                  </label>
-                  <label>
-                    Ação ao clicar no botão
-                    <select
-                      value={promoDraft.promo_cta_type}
-                      onChange={(e) =>
-                        setPromoDraft({
-                          ...promoDraft,
-                          promo_cta_type: e.target.value === "whatsapp" ? "whatsapp" : "vitrine",
-                        })
-                      }
-                    >
-                      <option value="vitrine">Rolar para a vitrine (#vitrine)</option>
-                      <option value="whatsapp">Abrir WhatsApp da loja</option>
-                    </select>
-                  </label>
-                </div>
               </div>
               <div className="flex flex-wrap items-center gap-3 pt-1">
                 <Button
@@ -909,7 +882,11 @@ export function AdminPanel() {
                     }
                     setSaving(true);
                     try {
-                      await savePromotion(promoDraft);
+                      await savePromotion({
+                        ...promoDraft,
+                        promo_cta_label: "",
+                        promo_cta_type: "vitrine",
+                      });
                       toast.success("Promoção salva!");
                     } catch (err) {
                       toast.error(err instanceof Error ? err.message : "Erro ao salvar promoção.");
@@ -927,7 +904,12 @@ export function AdminPanel() {
                   className="text-xs text-muted-foreground hover:text-foreground"
                   disabled={saving || (!promoDraft.promo_active && !data.promotion.promo_active)}
                   onClick={async () => {
-                    const hiddenDraft: StorePromotion = { ...promoDraft, promo_active: false };
+                    const hiddenDraft: StorePromotion = {
+                      ...promoDraft,
+                      promo_active: false,
+                      promo_cta_label: "",
+                      promo_cta_type: "vitrine",
+                    };
                     setPromoDraft(hiddenDraft);
                     setSaving(true);
                     try {
