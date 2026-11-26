@@ -664,11 +664,13 @@ export function useStore(options?: { scope?: StoreScope; enabled?: boolean }) {
     async (product: Product) => {
       const existing = data.products.find((p) => p.id === product.id);
       if (!isSupabaseConfigured) {
+        const current = loadStore();
+        const existsLocally = current.products.some((p) => p.id === product.id);
         const next: StoreData = {
-          ...data,
-          products: existing
-            ? data.products.map((p) => (p.id === product.id ? product : p))
-            : [...data.products, product],
+          ...current,
+          products: existsLocally
+            ? current.products.map((p) => (p.id === product.id ? product : p))
+            : [product, ...current.products],
         };
         saveStore(next);
         setData(next);

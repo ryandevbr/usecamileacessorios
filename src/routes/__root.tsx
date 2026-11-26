@@ -78,18 +78,37 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Use Camile Acessórios" },
+      { title: "Use Camile Acessórios — Prata 925 e Semijoias" },
       {
         name: "description",
-        content: "Prata 925 e Semijoias. Loja 100% online com envio para todo o Brasil.",
+        content:
+          "Prata 925 e Semijoias selecionadas para realçar o seu estilo. Loja 100% online com envio para todo o Brasil.",
       },
       { name: "color-scheme", content: "light only" },
       // Remover no lançamento no domínio oficial .com.br.
       { name: "robots", content: "noindex, nofollow" },
-      { property: "og:title", content: "Use Camile Acessórios" },
-      { property: "og:description", content: "Seu estilo merece esse brilho." },
+      { property: "og:title", content: "Use Camile Acessórios — Prata 925 e Semijoias" },
+      {
+        property: "og:description",
+        content:
+          "Prata 925 e Semijoias selecionadas para realçar o seu estilo. Loja 100% online com envio para todo o Brasil.",
+      },
+      { property: "og:image", content: "/og-image.png" },
+      { property: "og:image:width", content: "1200" },
+      { property: "og:image:height", content: "630" },
+      { property: "og:image:type", content: "image/png" },
+      { property: "og:image:alt", content: "Use Camile Acessórios — Prata 925 e Semijoias" },
       { property: "og:type", content: "website" },
+      { property: "og:locale", content: "pt_BR" },
+      { property: "og:site_name", content: "Use Camile Acessórios" },
       { name: "twitter:card", content: "summary_large_image" },
+      { name: "twitter:title", content: "Use Camile Acessórios — Prata 925 e Semijoias" },
+      {
+        name: "twitter:description",
+        content:
+          "Prata 925 e Semijoias selecionadas para realçar o seu estilo. Loja 100% online com envio para todo o Brasil.",
+      },
+      { name: "twitter:image", content: "/og-image.png" },
     ],
     links: [
       {
