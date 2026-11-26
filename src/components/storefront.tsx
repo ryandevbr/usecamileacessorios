@@ -97,7 +97,6 @@ export function Storefront() {
   }, [filter, query, sort]);
   const banners = data.banners.filter((b) => b.active);
   const currentSlide = banners.length > 0 ? slide % banners.length : 0;
-  const activeBanner = banners[currentSlide];
   useEffect(() => {
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches || banners.length < 2) return;
     const timer = setInterval(() => setSlide((s) => (s + 1) % banners.length), 3000);
@@ -269,35 +268,21 @@ export function Storefront() {
       </header>
       <main>
         <section id="inicio" className="hero">
-          <div
-            className={`hero-media ${
-              activeBanner?.mobile_image_url?.trim()
-                ? "aspect-4/5 max-h-115 md:aspect-auto md:max-h-none"
-                : "aspect-16/10 md:aspect-auto"
-            }`}
-          >
-            {banners.map((b, i) => {
-              const mobileUrl = b.mobile_image_url?.trim() ?? "";
-              return (
-                <picture
-                  key={b.id}
-                  className={`hero-photo block ${i === currentSlide ? "opacity-100" : "opacity-0 pointer-events-none"}`}
-                  onClick={() => b.filter && scroll(b.filter)}
-                >
-                  {mobileUrl && <source media="(max-width: 767px)" srcSet={mobileUrl} />}
-                  <img
-                    src={b.image_url}
-                    alt={b.alt || "Banner Use Camile Acessórios"}
-                    className={`w-full h-full object-cover ${
-                      mobileUrl ? "object-center" : "object-[72%_center] md:object-center"
-                    }`}
-                    loading={i === 0 ? "eager" : "lazy"}
-                    fetchPriority={i === 0 ? "high" : "auto"}
-                    decoding="async"
-                  />
-                </picture>
-              );
-            })}
+          <div className="hero-media aspect-video md:aspect-auto">
+            {banners.map((b, i) => (
+              <img
+                key={b.id}
+                src={b.image_url}
+                alt={b.alt || "Banner Use Camile Acessórios"}
+                className={`hero-photo w-full h-full object-cover object-center ${
+                  i === currentSlide ? "opacity-100" : "opacity-0 pointer-events-none"
+                }`}
+                loading={i === 0 ? "eager" : "lazy"}
+                fetchPriority={i === 0 ? "high" : "auto"}
+                decoding="async"
+                onClick={() => b.filter && scroll(b.filter)}
+              />
+            ))}
             <div className="hero-scrim pointer-events-none" />
             <div
               aria-hidden="true"

@@ -101,7 +101,6 @@ export function AdminPanel() {
   } | null>(null);
   const [profile, setProfile] = useState(false);
   const [sizeInfo, setSizeInfo] = useState("");
-  const [mobileSizeInfo, setMobileSizeInfo] = useState("");
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [autoFillOnUpload, setAutoFillOnUpload] = useState(true);
@@ -120,11 +119,8 @@ export function AdminPanel() {
   const lastProductFileRef = useRef<File | null>(null);
   const productModalSessionRef = useRef(0);
 
-  const cleanupPendingUploads = (keepUrls?: string | string[]) => {
-    const kept = new Set(
-      (Array.isArray(keepUrls) ? keepUrls : keepUrls ? [keepUrls] : []).filter(Boolean),
-    );
-    const toDelete = pendingUploadsRef.current.filter((url) => url && !kept.has(url));
+  const cleanupPendingUploads = (keepUrl?: string) => {
+    const toDelete = pendingUploadsRef.current.filter((url) => url && url !== keepUrl);
     pendingUploadsRef.current = [];
     for (const url of toDelete) {
       void deleteStoreImage(url);
@@ -301,27 +297,22 @@ export function AdminPanel() {
     }
   }
 
-  async function upload(file: File, kind: "product" | "banner" | "banner-mobile" | "profile") {
+  async function upload(file: File, kind: "product" | "banner" | "profile") {
     const sessionId = productModalSessionRef.current;
     setUploading(true);
     try {
       const result =
-        kind === "banner" || kind === "banner-mobile"
+        kind === "banner"
           ? await uploadOriginalBannerImage(file)
           : await uploadStoreImage(file, kind === "product" ? "products" : "profiles");
-      if (kind === "banner" || kind === "banner-mobile") {
+      if (kind === "banner") {
         const sizeLabel =
           result.original >= 1024 * 1024
             ? `${(result.original / (1024 * 1024)).toFixed(1).replace(".", ",")} MB`
             : `${Math.round(result.original / 1024)} KB`;
         pendingUploadsRef.current.push(result.url);
-        if (kind === "banner") {
-          setSizeInfo(sizeLabel);
-          setBanner((prev) => (prev ? { ...prev, image_url: result.url } : prev));
-        } else {
-          setMobileSizeInfo(sizeLabel);
-          setBanner((prev) => (prev ? { ...prev, mobile_image_url: result.url } : prev));
-        }
+        setSizeInfo(sizeLabel);
+        setBanner((prev) => (prev ? { ...prev, image_url: result.url } : prev));
       } else {
         setSizeInfo(
           `${Math.round(result.original / 1024)} KB → ${Math.round(result.compressed / 1024)} KB`,
@@ -934,11 +925,10 @@ export function AdminPanel() {
               <Button
                 onClick={() => {
                   setSizeInfo("");
-                  setMobileSizeInfo("");
                   setBanner({
                     id: crypto.randomUUID(),
                     image_url: "",
-                    mobile_image_url: "",
+                    mobile_image_url: null,
                     alt: "Banner Use Camile Acessórios",
                     active: true,
                     filter: "",
@@ -964,7 +954,6 @@ export function AdminPanel() {
                   <p className="text-sm font-medium">Banner {i + 1}</p>
                   <p className="text-xs text-muted-foreground mt-2">
                     Ordem {i + 1} · {b.filter || "Sem filtro"}
-                    {b.mobile_image_url?.trim() ? " · Com imagem mobile" : ""}
                   </p>
                   <label className="flex gap-2 items-center mt-2">
                     <input
@@ -972,7 +961,12 @@ export function AdminPanel() {
                       checked={b.active}
                       onChange={async (e) => {
                         try {
-                          await saveBanner({ ...b, active: e.target.checked, display_order: i });
+                          await saveBanner({
+                            ...b,
+                            mobile_image_url: null,
+                            active: e.target.checked,
+                            display_order: i,
+                          });
                         } catch (err) {
                           toast.error(
                             err instanceof Error ? err.message : "Erro ao atualizar banner.",
@@ -1021,10 +1015,9 @@ export function AdminPanel() {
                     aria-label="Editar banner"
                     onClick={() => {
                       setSizeInfo("");
-                      setMobileSizeInfo("");
                       setBanner({
                         ...b,
-                        mobile_image_url: b.mobile_image_url ?? "",
+                        mobile_image_url: null,
                         display_order: b.display_order ?? i,
                       });
                     }}
@@ -1659,7 +1652,7 @@ export function AdminPanel() {
             <div className="space-y-4">
               <div className="rounded-lg border bg-muted/30 p-3.5 space-y-3">
                 <label>
-                  Foto principal (Desktop — 16:9)
+                  Imagem do banner (16:9)
                   <input
                     type="file"
                     accept="image/*"
@@ -1673,7 +1666,7 @@ export function AdminPanel() {
                 {banner.image_url && (
                   <img
                     src={banner.image_url}
-                    alt="Prévia do banner principal"
+                    alt="Prévia do banner"
                     className="w-full h-36 object-contain bg-muted rounded"
                   />
                 )}
@@ -1687,59 +1680,6 @@ export function AdminPanel() {
                     value={banner.image_url.startsWith("data:") ? "" : banner.image_url}
                     onChange={(e) => setBanner({ ...banner, image_url: e.target.value })}
                     placeholder="https://..."
-                  />
-                </label>
-              </div>
-              <div className="rounded-lg border bg-muted/30 p-3.5 space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs text-muted-foreground">
-                    Imagem para Celular (opcional — 4:5 ou 1:1)
-                  </span>
-                  {banner.mobile_image_url && (
-                    <button
-                      type="button"
-                      className="text-[11px] text-destructive hover:underline cursor-pointer"
-                      onClick={() => {
-                        setMobileSizeInfo("");
-                        setBanner({ ...banner, mobile_image_url: "" });
-                      }}
-                    >
-                      Remover
-                    </button>
-                  )}
-                </div>
-                <input
-                  type="file"
-                  aria-label="Imagem para Celular (opcional — 4:5 ou 1:1)"
-                  accept="image/*"
-                  disabled={uploading}
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) void upload(f, "banner-mobile");
-                  }}
-                />
-                {banner.mobile_image_url && (
-                  <img
-                    src={banner.mobile_image_url}
-                    alt="Prévia do banner para celular"
-                    className="w-full h-36 object-contain bg-muted rounded"
-                  />
-                )}
-                {mobileSizeInfo && (
-                  <p className="text-xs text-muted-foreground">
-                    Arquivo original mobile ({mobileSizeInfo})
-                  </p>
-                )}
-                <label>
-                  Ou URL da imagem para celular
-                  <input
-                    value={
-                      (banner.mobile_image_url ?? "").startsWith("data:")
-                        ? ""
-                        : (banner.mobile_image_url ?? "")
-                    }
-                    onChange={(e) => setBanner({ ...banner, mobile_image_url: e.target.value })}
-                    placeholder="Deixe vazio para usar a imagem principal"
                   />
                 </label>
               </div>
@@ -1770,16 +1710,17 @@ export function AdminPanel() {
                 disabled={saving || uploading}
                 onClick={async () => {
                   if (!banner.image_url.trim()) {
-                    toast.error("Adicione a foto principal do banner.");
+                    toast.error("Adicione a imagem do banner.");
                     return;
                   }
                   setSaving(true);
                   try {
                     await saveBanner({
                       ...banner,
+                      mobile_image_url: null,
                       alt: banner.alt.trim() || "Banner Use Camile Acessórios",
                     });
-                    cleanupPendingUploads([banner.image_url, banner.mobile_image_url ?? ""]);
+                    cleanupPendingUploads(banner.image_url);
                     setBanner(null);
                     toast.success("Banner salvo!");
                   } catch (err) {

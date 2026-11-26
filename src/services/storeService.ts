@@ -135,7 +135,7 @@ function mapBannerRow(row: HeroBannerRow, fallbackIndex: number): Banner {
   return {
     id: row.id,
     image_url: row.image_url,
-    mobile_image_url: row.mobile_image_url ?? "",
+    mobile_image_url: row.mobile_image_url ?? null,
     alt: row.alt?.trim() || DEFAULT_BANNER_ALT,
     active: Boolean(row.active),
     filter: row.filter ?? "",
@@ -181,11 +181,10 @@ function toProductPayload(product: Product) {
 }
 
 function toBannerPayload(banner: Banner, displayOrder: number) {
-  const mobileUrl = (banner.mobile_image_url ?? "").trim();
   return {
     id: banner.id || crypto.randomUUID(),
     image_url: banner.image_url.trim(),
-    mobile_image_url: mobileUrl ? mobileUrl : null,
+    mobile_image_url: null,
     alt: banner.alt.trim() || DEFAULT_BANNER_ALT,
     active: Boolean(banner.active),
     filter: banner.filter.trim(),
@@ -446,7 +445,7 @@ export async function upsertBanner(
     throw new Error(`Erro ao salvar banner: ${error?.message ?? "resposta vazia"}`);
   }
 
-  const kept = new Set([payload.image_url, payload.mobile_image_url ?? ""]);
+  const kept = new Set([payload.image_url]);
   for (const prevUrl of previousImageUrls) {
     if (prevUrl && !kept.has(prevUrl)) {
       await deleteStoreImage(prevUrl);
@@ -755,6 +754,7 @@ export function useStore(options?: { scope?: StoreScope; enabled?: boolean }) {
       if (!isSupabaseConfigured) {
         const bannerWithOrder: Banner = {
           ...banner,
+          mobile_image_url: null,
           alt: banner.alt.trim() || DEFAULT_BANNER_ALT,
           display_order: displayOrder,
         };
@@ -779,7 +779,6 @@ export function useStore(options?: { scope?: StoreScope; enabled?: boolean }) {
       }
       if (
         existing?.mobile_image_url &&
-        existing.mobile_image_url !== (banner.mobile_image_url ?? "") &&
         !isImageStillReferenced(existing.mobile_image_url, data, {
           kind: "banners",
           id: existing.id,
