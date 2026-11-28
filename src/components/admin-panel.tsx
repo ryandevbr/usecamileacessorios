@@ -28,6 +28,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { BatchImportDialog } from "@/components/batch-import-dialog";
+import { StoryCardModal } from "@/components/admin/StoryCardModal";
 import { normalizeImageFile } from "@/lib/normalize-image";
 import { useStore } from "@/services/storeService";
 import {
@@ -127,6 +128,7 @@ export function AdminPanel() {
   } | null>(null);
   const [profile, setProfile] = useState(false);
   const [batchOpen, setBatchOpen] = useState(false);
+  const [storyProduct, setStoryProduct] = useState<Product | null>(null);
   const [sizeInfo, setSizeInfo] = useState("");
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -888,7 +890,18 @@ export function AdminPanel() {
                         </p>
                       )}
                     </div>
-                    <div className="flex gap-2 flex-wrap">
+                    <div className="flex gap-2 flex-wrap items-center">
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        title="Gerar arte 9:16 para Stories e Status do WhatsApp"
+                        aria-label={`Gerar Story de ${p.name}`}
+                        className="h-9 px-2.5 text-xs font-medium"
+                        onClick={() => setStoryProduct(p)}
+                      >
+                        📲 Story
+                      </Button>
                       <Button
                         variant="ghost"
                         size="icon"
@@ -2448,6 +2461,16 @@ export function AdminPanel() {
         categoryNames={effectiveCategoryNames}
         materialNames={effectiveMaterialNames}
         saveProduct={saveProduct}
+      />
+      <StoryCardModal
+        open={!!storyProduct}
+        product={storyProduct}
+        storeName={STORE_CONFIG.name}
+        storeUrl={
+          typeof window !== "undefined" ? window.location.host : `${STORE_CONFIG.slug}.vercel.app`
+        }
+        logoUrl="/logo.png"
+        onClose={() => setStoryProduct(null)}
       />
     </main>
   );
