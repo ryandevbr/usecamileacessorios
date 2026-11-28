@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import {
   AlertCircle,
   ArrowLeft,
@@ -153,6 +153,8 @@ export function BatchImportDialog({
   const objectUrlsRef = useRef<Set<string>>(new Set());
   const cancelRequestedRef = useRef<boolean>(false);
   const mountedRef = useRef<boolean>(true);
+  const galleryInputRef = useRef<HTMLInputElement | null>(null);
+  const cameraInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     itemsRef.current = items;
@@ -283,6 +285,12 @@ export function BatchImportDialog({
         );
       }
     }
+  };
+
+  const handleFilesChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const selected = e.target.files;
+    void handleFilesSelected(selected);
+    e.target.value = "";
   };
 
   const removeItem = (id: string) => {
@@ -826,21 +834,46 @@ export function BatchImportDialog({
                     automática.
                   </p>
                 </div>
-                <label className="inline-flex cursor-pointer items-center justify-center rounded-md bg-primary px-4 py-2.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors w-fit mx-auto">
-                  Escolher fotos
-                  <input
-                    type="file"
-                    multiple
-                    accept="image/*,.heic,.heif"
+                <input
+                  ref={galleryInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  aria-label="Escolher fotos da galeria"
+                  disabled={!!converting}
+                  className="hidden"
+                  onChange={handleFilesChange}
+                />
+                <input
+                  ref={cameraInputRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  aria-label="Tirar foto com a câmera"
+                  disabled={!!converting}
+                  className="hidden"
+                  onChange={handleFilesChange}
+                />
+                <div className="grid grid-cols-2 gap-3 w-full pt-1">
+                  <Button
+                    type="button"
+                    variant="default"
+                    className="w-full h-11 text-xs font-medium"
                     disabled={!!converting}
-                    className="sr-only"
-                    onChange={(e) => {
-                      const selected = e.target.files;
-                      void handleFilesSelected(selected);
-                      e.target.value = "";
-                    }}
-                  />
-                </label>
+                    onClick={() => galleryInputRef.current?.click()}
+                  >
+                    🖼️ Galeria
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full h-11 text-xs font-medium"
+                    disabled={!!converting}
+                    onClick={() => cameraInputRef.current?.click()}
+                  >
+                    📷 Tirar Foto
+                  </Button>
+                </div>
               </div>
 
               {converting && (

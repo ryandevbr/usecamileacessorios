@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import {
   ArrowRight,
@@ -50,12 +50,66 @@ import {
 } from "@/services/couponService";
 import { money, priceOf, type Product } from "@/data/catalog";
 
+function normalizeFilterValue(value: string | null | undefined): string {
+  return String(value ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+function isActiveProduct(product: Product): boolean {
+  return product.active !== false;
+}
+
+function isActiveSaleProduct(product: Product): boolean {
+  return isActiveProduct(product) && product.is_on_sale === true && Number(product.sale_price) > 0;
+}
+
+function buildStorefrontFilters(
+  activeProducts: Product[],
+  categoryNames: string[],
+  materialNames: string[],
+  nicheDefaults: { categories: readonly string[]; materials: readonly string[] },
+): string[] {
+  const hasPromotions = activeProducts.some(isActiveSaleProduct);
+
+  const activeOptionKeys = new Set<string>();
+  for (const p of activeProducts) {
+    const catKey = normalizeFilterValue(p.category);
+    const matKey = normalizeFilterValue(p.material);
+    if (catKey) activeOptionKeys.add(catKey);
+    if (matKey) activeOptionKeys.add(matKey);
+  }
+
+  const candidateMaterials = mergeOptionValues(
+    materialNames.length > 0 ? materialNames : [...nicheDefaults.materials],
+    activeProducts.map((p) => p.material),
+  );
+  const candidateCategories = mergeOptionValues(
+    categoryNames.length > 0 ? categoryNames : [...nicheDefaults.categories],
+    activeProducts.map((p) => p.category),
+  );
+
+  const availableOptions = mergeOptionValues([
+    ...candidateMaterials,
+    ...candidateCategories,
+  ]).filter((option) => {
+    const key = normalizeFilterValue(option);
+    if (!key) return false;
+    if (activeOptionKeys.has(key)) return true;
+    if (key === "semijoias" && activeOptionKeys.has("semijoia")) return true;
+    return false;
+  });
+
+  return ["Todos", ...(hasPromotions ? ["Promoções"] : []), ...availableOptions];
+}
+
 function matchesFilter(product: Product, selected: string): boolean {
   if (selected === "Todos") return true;
-  if (selected === "Promoções") return product.is_on_sale;
-  const target = optionLookupKey(selected);
-  const productCategory = optionLookupKey(product.category);
-  const productMaterial = optionLookupKey(product.material);
+  if (selected === "Promoções") return isActiveSaleProduct(product);
+  const target = normalizeFilterValue(selected);
+  const productCategory = normalizeFilterValue(product.category);
+  const productMaterial = normalizeFilterValue(product.material);
   if (target === "semijoias" && productMaterial === "semijoia") return true;
   return productCategory === target || productMaterial === target;
 }
@@ -201,25 +255,25 @@ export function Storefront() {
     );
   }
 
-  const activeProducts = data.products.filter((p) => p.active);
+  const activeProducts = useMemo(() => data.products.filter(isActiveProduct), [data.products]);
   const nicheDefaults = NICHE_CATALOG_DEFAULTS[STORE_CONFIG.niche];
-  const dynamicMaterials = mergeOptionValues(
-    materialNames.length > 0 ? materialNames : [...nicheDefaults.materials],
-    activeProducts.map((p) => p.material),
+  const filters = useMemo(
+    () => buildStorefrontFilters(activeProducts, categoryNames, materialNames, nicheDefaults),
+    [activeProducts, categoryNames, materialNames, nicheDefaults],
   );
-  const dynamicCategories = mergeOptionValues(
-    categoryNames.length > 0 ? categoryNames : [...nicheDefaults.categories],
-    activeProducts.map((p) => p.category),
-  );
-  const filters = [
-    "Todos",
-    "Promoções",
-    ...mergeOptionValues([...dynamicMaterials, ...dynamicCategories]),
-  ];
+
+  useEffect(() => {
+    if (filter !== "Todos" && !filters.includes(filter)) {
+      setFilter("Todos");
+    }
+  }, [filters, filter]);
+
+  const effectiveFilter = filters.includes(filter) ? filter : "Todos";
+
   const filteredProducts = activeProducts
     .filter(
       (p) =>
-        matchesFilter(p, filter) &&
+        matchesFilter(p, effectiveFilter) &&
         `${p.name} ${p.sku}`.toLowerCase().includes(query.toLowerCase()),
     )
     .sort((a, b) =>
@@ -248,7 +302,7 @@ export function Storefront() {
       (targetKey === "semijoias"
         ? filters.find((item) => optionLookupKey(item) === "semijoia")
         : undefined);
-    setFilter(matched ?? f);
+    setFilter(matched ?? "Todos");
     document.getElementById("vitrine")?.scrollIntoView({ behavior: "smooth" });
   };
 
@@ -567,8 +621,8 @@ export function Storefront() {
             {filters.map((f) => (
               <Button
                 key={f}
-                variant={filter === f ? "default" : "ghost"}
-                className={`filter-pill ${filter !== f ? "border border-border" : ""}`}
+                variant={effectiveFilter === f ? "default" : "ghost"}
+                className={`filter-pill ${effectiveFilter !== f ? "border border-border" : ""}`}
                 onClick={() => setFilter(f)}
               >
                 {f}

@@ -203,6 +203,21 @@ describe("Multi-tenant store_slug isolation", () => {
     expect(
       isUserAuthorizedForStore({ store_slug: "outra-loja", role: "superadmin" }, "patricia-modas"),
     ).toBe(true);
+    expect(
+      isUserAuthorizedForStore({ store_slug: "outra-loja", role: "super_admin" }, "patricia-modas"),
+    ).toBe(true);
+    expect(
+      isUserAuthorizedForStore(
+        { store_slug: "outra-loja", is_super_admin: true },
+        "patricia-modas",
+      ),
+    ).toBe(true);
+    expect(
+      isUserAuthorizedForStore(
+        { store_slug: "outra-loja", is_super_admin: false },
+        "patricia-modas",
+      ),
+    ).toBe(false);
     expect(isUserAuthorizedForStore({}, "patricia-modas")).toBe(true);
     expect(isUserAuthorizedForStore(undefined, "patricia-modas")).toBe(true);
   });
@@ -225,11 +240,13 @@ describe("Multi-tenant store_slug isolation", () => {
     expect(authSignOutMock).toHaveBeenCalledTimes(1);
   });
 
-  it("allows login for matching store_slug, wildcard '*', and superadmin", async () => {
+  it("allows login for matching store_slug, wildcard '*', and super admin accounts", async () => {
     for (const metadata of [
       { store_slug: ACTIVE_STORE_SLUG },
       { store_slug: "*" },
       { store_slug: "outra-loja", role: "superadmin" },
+      { store_slug: "outra-loja", role: "super_admin" },
+      { store_slug: "outra-loja", is_super_admin: true },
     ]) {
       authSignInWithPasswordMock.mockResolvedValueOnce({
         data: {
@@ -244,6 +261,31 @@ describe("Multi-tenant store_slug isolation", () => {
 
       const state = await signInAdmin("admin@loja.com", "secret");
       expect(state.authenticated).toBe(true);
+    }
+    expect(authSignOutMock).not.toHaveBeenCalled();
+  });
+
+  it("allows persisted Super Admin session in getAuthState regardless of store_slug", async () => {
+    for (const metadata of [
+      { store_slug: "loja-estrangeira", is_super_admin: true },
+      { store_slug: "loja-estrangeira", role: "super_admin" },
+    ]) {
+      authGetSessionMock.mockResolvedValueOnce({
+        data: {
+          session: {
+            user: {
+              id: "u-super",
+              email: "super@admin.com",
+              user_metadata: metadata,
+            },
+          },
+        },
+        error: null,
+      });
+
+      const state = await getAuthState();
+      expect(state.authenticated).toBe(true);
+      expect(state.unauthorizedStore).toBeUndefined();
     }
     expect(authSignOutMock).not.toHaveBeenCalled();
   });

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   Plus,
@@ -149,6 +149,8 @@ export function AdminPanel() {
   const pendingUploadsRef = useRef<string[]>([]);
   const lastProductFileRef = useRef<File | null>(null);
   const productModalSessionRef = useRef(0);
+  const productGalleryInputRef = useRef<HTMLInputElement | null>(null);
+  const productCameraInputRef = useRef<HTMLInputElement | null>(null);
 
   const isModa = isFashionNiche();
   const isCalcados = isFootwearNiche();
@@ -461,6 +463,12 @@ export function AdminPanel() {
       setUploading(false);
     }
   }
+
+  const handleProductPhotoChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (f) void upload(f, "product");
+    e.target.value = "";
+  };
 
   const handleCreateInlineOption = async (type: CatalogOptionType) => {
     setSavingOption(true);
@@ -1365,19 +1373,49 @@ export function AdminPanel() {
           {edit && (
             <div className="overflow-y-auto min-h-0 space-y-5 pr-1">
               <div className="rounded-lg border bg-muted/40 p-4 space-y-3">
-                <label>
-                  Foto principal
+                <div className="space-y-2">
+                  <span className="block text-xs font-medium text-foreground">Foto principal</span>
                   <input
+                    ref={productGalleryInputRef}
                     type="file"
-                    accept="image/*,.heic,.heif"
+                    accept="image/*"
+                    multiple
+                    aria-label="Escolher foto da galeria"
                     disabled={uploading}
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) void upload(f, "product");
-                      e.target.value = "";
-                    }}
+                    className="hidden"
+                    onChange={handleProductPhotoChange}
                   />
-                </label>
+                  <input
+                    ref={productCameraInputRef}
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    aria-label="Tirar foto com a câmera"
+                    disabled={uploading}
+                    className="hidden"
+                    onChange={handleProductPhotoChange}
+                  />
+                  <div className="grid grid-cols-2 gap-3 w-full">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="w-full h-11 text-xs font-medium"
+                      disabled={uploading}
+                      onClick={() => productGalleryInputRef.current?.click()}
+                    >
+                      🖼️ Galeria
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="default"
+                      className="w-full h-11 text-xs font-medium"
+                      disabled={uploading}
+                      onClick={() => productCameraInputRef.current?.click()}
+                    >
+                      📷 Tirar Foto
+                    </Button>
+                  </div>
+                </div>
                 {edit.image_url && (
                   <img
                     src={edit.image_url}

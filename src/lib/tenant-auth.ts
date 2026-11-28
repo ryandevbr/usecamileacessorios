@@ -7,7 +7,7 @@ export const WRONG_STORE_ACCOUNT_ERROR = "Esta conta administrativa pertence a o
  * o painel administrativo da loja ativa (`activeSlug`).
  *
  * Regras:
- * - `role === "superadmin"` -> acesso liberado para todas as lojas.
+ * - `is_super_admin === true` ou `role === "super_admin"` / `"superadmin"` -> acesso liberado para todas as lojas.
  * - `store_slug` ausente/vazio ou `"*"` -> acesso liberado (compatibilidade / superacesso).
  * - `store_slug` definido -> deve coincidir (case-insensitive) com `activeSlug`.
  */
@@ -21,7 +21,7 @@ export function isUserAuthorizedForStore(
 
   const rawRole = userMetadata["role"];
   const role = typeof rawRole === "string" ? rawRole.trim().toLowerCase() : "";
-  if (role === "superadmin") {
+  if (userMetadata["is_super_admin"] === true || role === "super_admin" || role === "superadmin") {
     return true;
   }
 
