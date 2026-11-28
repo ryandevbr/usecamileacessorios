@@ -1,8 +1,13 @@
+import { STORE_CONFIG, getWhatsappUrl } from "@/config/store.config";
+
 export const storeContent = {
-  name: "Use Camile Acessórios",
-  whatsapp: "https://wa.me/5531998250833",
-  instagram: "https://instagram.com/usecamileacessorios",
-  slogan: "Invista em você: acessórios são a alma do look!",
+  name: STORE_CONFIG.name,
+  whatsapp: getWhatsappUrl(),
+  whatsappDisplay: STORE_CONFIG.whatsappDisplay,
+  instagram: STORE_CONFIG.instagramUrl,
+  instagramHandle: STORE_CONFIG.instagramHandle,
+  slogan: STORE_CONFIG.hero.title,
   about:
-    "Acreditamos que os pequenos detalhes revelam quem você é. Idealizada por Echiley Vasconcelos, a Use Camile nasceu do amor por acessórios que tornam o cotidiano mais especial. Nossa curadoria de Prata 925 e Semijoias reúne delicadeza, personalidade e aquele brilho que é só seu. Uma loja 100% online, pertinho de você, onde quer que esteja no Brasil.",
+    STORE_CONFIG.aboutText ??
+    "Nossa curadoria reúne estilo, qualidade e atendimento personalizado com envio para todo o Brasil.",
 };

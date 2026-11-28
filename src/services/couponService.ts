@@ -1,9 +1,13 @@
-import { priceOf, type Coupon, type Product } from "@/data/catalog";
-export interface CartItem {
-  product: Product;
-  quantity: number;
+import { priceOf, type CartItem, type Coupon } from "@/data/catalog";
+
+export type { CartItem };
+
+export function getCartItemKey(productId: string, selectedSize?: string): string {
+  return `${productId}::${selectedSize?.trim() ?? ""}`;
 }
+
 export const normalizeCode = (code: string) => code.toUpperCase().replace(/\s/g, "");
+
 export function calculateCoupon(
   items: CartItem[],
   coupon: Coupon | undefined,

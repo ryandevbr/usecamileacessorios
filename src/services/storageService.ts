@@ -1,3 +1,4 @@
+import { ACTIVE_STORE_SLUG } from "@/config/store.config";
 import { STORE_MEDIA_BUCKET, isSupabaseConfigured, supabase } from "@/lib/supabase";
 import { compressImage } from "@/utils/imageCompressor";
 
@@ -15,6 +16,24 @@ export interface UploadedStoreImage {
 export const MAX_BANNER_IMAGE_BYTES = 15 * 1024 * 1024;
 
 const PUBLIC_BUCKET_SEGMENT = `/storage/v1/object/public/${STORE_MEDIA_BUCKET}/`;
+const LEGACY_FOLDER_PREFIX_RE = /^(products|banners|profiles)\//;
+
+export function buildStoreMediaPath(
+  folder: MediaFolder,
+  fileName: string,
+  storeSlug: string = ACTIVE_STORE_SLUG,
+): string {
+  const cleanSlug = storeSlug.trim().toLowerCase() || ACTIVE_STORE_SLUG;
+  return `${cleanSlug}/${folder}/${fileName}`;
+}
+
+export function isStoreMediaPathOwned(
+  storagePath: string,
+  storeSlug: string = ACTIVE_STORE_SLUG,
+): boolean {
+  const cleanSlug = storeSlug.trim().toLowerCase() || ACTIVE_STORE_SLUG;
+  return storagePath.startsWith(`${cleanSlug}/`) || LEGACY_FOLDER_PREFIX_RE.test(storagePath);
+}
 
 const MIME_TO_EXT: Record<string, string> = {
   "image/jpeg": "jpg",
@@ -81,7 +100,7 @@ export async function uploadOriginalBannerImage(file: File): Promise<UploadedSto
   }
 
   const ext = resolveOriginalExtension(file);
-  const filePath = `banners/${crypto.randomUUID()}.${ext}`;
+  const filePath = buildStoreMediaPath("banners", `${crypto.randomUUID()}.${ext}`);
   const { error: uploadError } = await supabase.storage
     .from(STORE_MEDIA_BUCKET)
     .upload(filePath, file, {
@@ -132,7 +151,7 @@ export async function uploadStoreImage(
     };
   }
 
-  const filePath = `${folder}/${crypto.randomUUID()}.webp`;
+  const filePath = buildStoreMediaPath(folder, `${crypto.randomUUID()}.webp`);
   const { error: uploadError } = await supabase.storage
     .from(STORE_MEDIA_BUCKET)
     .upload(filePath, compressed.blob, {
@@ -157,10 +176,27 @@ export async function uploadStoreImage(
 export async function deleteStoreImage(imageUrl: string): Promise<void> {
   if (!isSupabaseConfigured || !supabase || !imageUrl) return;
   const storagePath = extractStoragePath(imageUrl);
-  if (!storagePath) return;
+  if (!storagePath || !isStoreMediaPathOwned(storagePath)) return;
 
   const { error } = await supabase.storage.from(STORE_MEDIA_BUCKET).remove([storagePath]);
   if (error) {
     console.warn("Não foi possível remover a imagem antiga do Storage:", error.message);
+  }
+}
+
+export async function deleteStoreImages(imageUrls: string[]): Promise<void> {
+  if (!isSupabaseConfigured || !supabase || imageUrls.length === 0) return;
+  const uniquePaths = Array.from(
+    new Set(
+      imageUrls
+        .map((url) => extractStoragePath(url))
+        .filter((path): path is string => path !== null && path !== "" && isStoreMediaPathOwned(path)),
+    ),
+  );
+  if (uniquePaths.length === 0) return;
+
+  const { error } = await supabase.storage.from(STORE_MEDIA_BUCKET).remove(uniquePaths);
+  if (error) {
+    console.warn("Não foi possível remover imagens antigas do Storage:", error.message);
   }
 }

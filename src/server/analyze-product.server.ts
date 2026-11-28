@@ -1,4 +1,12 @@
 import { createClient } from "@supabase/supabase-js";
+import {
+  ACTIVE_STORE_SLUG,
+  NICHE_CATALOG_DEFAULTS,
+  STORE_CONFIG,
+  type StoreNiche,
+} from "@/config/store.config";
+import { toCommercialPrice } from "@/lib/batch-retry";
+import { WRONG_STORE_ACCOUNT_ERROR, isUserAuthorizedForStore } from "@/lib/tenant-auth";
 
 export type AiProviderName = "groq" | "gemini" | "openrouter";
 
@@ -8,6 +16,8 @@ export interface AnalyzeProductRequestBody {
   imageUrl?: string;
   availableCategories?: string[];
   availableMaterials?: string[];
+  niche?: StoreNiche;
+  estimatePrice?: boolean;
 }
 
 export interface AnalyzedProductCharacteristic {
@@ -21,6 +31,7 @@ export interface AnalyzedProductPayload {
   material: string;
   description: string;
   characteristics: AnalyzedProductCharacteristic[];
+  estimatedPrice?: number | null | undefined;
 }
 
 export interface AnalyzeProductMeta {
@@ -225,6 +236,18 @@ async function verifyAdminAuth(request: Request): Promise<Response | null> {
     );
   }
 
+  const activeStoreSlug = (
+    process.env["STORE_SLUG"] ??
+    process.env["VITE_STORE_SLUG"] ??
+    ACTIVE_STORE_SLUG
+  )
+    .trim()
+    .toLowerCase();
+
+  if (!isUserAuthorizedForStore(data.user.user_metadata, activeStoreSlug)) {
+    return jsonResponse({ code: "FORBIDDEN", error: WRONG_STORE_ACCOUNT_ERROR }, 403);
+  }
+
   return null;
 }
 
@@ -387,10 +410,156 @@ function matchAllowedOptionWithFallback(value: unknown, allowed: string[]): stri
   return exact ?? fallback;
 }
 
-function buildSystemPrompt(categories: string[], materials: string[]): string {
+function normalizeKeyNoAccents(value: string): string {
+  return value
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+const MODA_CATEGORY_KEYS = new Set(
+  NICHE_CATALOG_DEFAULTS.moda.categories.map(normalizeKeyNoAccents),
+);
+const CALCADOS_CATEGORY_KEYS = new Set(
+  NICHE_CATALOG_DEFAULTS.calcados.categories.map(normalizeKeyNoAccents),
+);
+
+function buildForbiddenAccessoryCategories(allowedKeys: Set<string>): Set<string> {
+  return new Set([
+    ...NICHE_CATALOG_DEFAULTS.acessorios.categories
+      .map(normalizeKeyNoAccents)
+      .filter((key) => !allowedKeys.has(key)),
+    "joias",
+    "semijoias",
+    "bijuterias",
+    "acessorios",
+  ]);
+}
+
+const FORBIDDEN_MODA_CATEGORIES = buildForbiddenAccessoryCategories(MODA_CATEGORY_KEYS);
+const FORBIDDEN_CALCADOS_CATEGORIES = buildForbiddenAccessoryCategories(CALCADOS_CATEGORY_KEYS);
+
+const FORBIDDEN_NON_ACCESSORY_MATERIALS = new Set([
+  ...NICHE_CATALOG_DEFAULTS.acessorios.materials.map(normalizeKeyNoAccents),
+  "semijoias",
+  "prata",
+  "banho de ouro",
+  "banhado a ouro",
+  "ouro 18k",
+  "rodio branco",
+]);
+
+function sanitizeOptionsForNiche(
+  input: unknown,
+  niche: StoreNiche,
+  kind: "categories" | "materials",
+): string[] {
+  const defaults = [...NICHE_CATALOG_DEFAULTS[niche][kind]];
+  const cleaned = sanitizeOptionList(input, []);
+  if (cleaned.length === 0) return defaults;
+
+  if (niche === "acessorios") {
+    return cleaned;
+  }
+
+  const forbidden =
+    kind === "materials"
+      ? FORBIDDEN_NON_ACCESSORY_MATERIALS
+      : niche === "calcados"
+        ? FORBIDDEN_CALCADOS_CATEGORIES
+        : FORBIDDEN_MODA_CATEGORIES;
+  const hadForbidden = cleaned.some((item) => forbidden.has(normalizeKeyNoAccents(item)));
+  const safe = cleaned.filter((item) => !forbidden.has(normalizeKeyNoAccents(item)));
+
+  if (safe.length === 0 || hadForbidden) {
+    return sanitizeOptionList([...defaults, ...safe], defaults);
+  }
+  return safe;
+}
+
+function resolveNiche(raw: unknown): StoreNiche {
+  if (raw === "moda" || raw === "acessorios" || raw === "calcados") return raw;
+  return STORE_CONFIG.niche;
+}
+
+function buildPriceGuidance(niche: StoreNiche): string {
+  if (niche === "moda") {
+    return "Estime também o campo numérico 'estimatedPrice' com um preço de varejo realista para o mercado brasileiro condizente com o tipo, tecido e complexidade visual da peça na foto, sempre terminado em .90: blusas/croppeds/regatas entre 59.90 e 99.90; shorts/saias entre 79.90 e 129.90; calças/conjuntos/vestidos entre 119.90 e 219.90.";
+  }
+  if (niche === "calcados") {
+    return "Estime também o campo numérico 'estimatedPrice' com um preço de varejo realista para o mercado brasileiro condizente com o tipo, material e complexidade visual do calçado na foto, sempre terminado em .90: chinelos/rasteiras entre 59.90 e 99.90; sandálias/tênis/mocassins entre 119.90 e 199.90; saltos elaborados/botas entre 159.90 e 249.90.";
+  }
+  return "Estime também o campo numérico 'estimatedPrice' com um preço de varejo realista para o mercado brasileiro condizente com o tipo, material e complexidade visual da peça na foto, sempre terminado em .90: bijuterias/anéis/brincos simples entre 19.90 e 49.90; semijoias/colares/conjuntos entre 59.90 e 129.90; bolsas e carteiras entre 89.90 e 189.90.";
+}
+
+function buildSystemPrompt(
+  categories: string[],
+  materials: string[],
+  niche: StoreNiche,
+  estimatePrice = false,
+): string {
+  const priceLine = estimatePrice ? `- ${buildPriceGuidance(niche)}` : "";
+  const priceSchemaField = estimatePrice
+    ? '  "estimatedPrice": 129.90 // number — preço de varejo realista para o mercado brasileiro, sempre terminado em .90'
+    : "";
+
+  if (niche === "moda") {
+    return [
+      `Você é a especialista em curadoria de moda feminina e copywriting da loja brasileira '${STORE_CONFIG.name}'.`,
+      "Analise cuidadosamente a foto da peça de vestuário feminino e responda EXCLUSIVAMENTE com um objeto JSON válido em português do Brasil (pt-BR), sem markdown, sem comentários e sem texto extra.",
+      "",
+      "Diretrizes obrigatórias de Moda Feminina:",
+      `- Identifique exclusivamente peças de vestuário feminino (${NICHE_CATALOG_DEFAULTS.moda.categories.join(", ")}) escolhendo estritamente uma opção da lista de categorias fornecida.`,
+      `- Preencha o campo 'material' com o tecido aparente da peça (${NICHE_CATALOG_DEFAULTS.moda.materials.join(", ")}) escolhendo estritamente uma opção da lista de tecidos fornecida.`,
+      "- Gere uma descrição elegante, feminina e persuasiva focada em caimento, ocasião de uso e conforto.",
+      "- Nunca classifique a peça como joia, bijuteria ou acessório metálico.",
+      ...(priceLine ? [priceLine] : []),
+      "",
+      "Schema JSON obrigatório:",
+      "{",
+      '  "name": "string — nome comercial elegante, curto e atrativo em português (ex.: Vestido Midi Linho com Fenda Lateral), sem SKU, preço ou nome da loja",',
+      `  "category": "string — EXATAMENTE uma opção de: ${categories.join(", ")}",`,
+      `  "material": "string — tecido aparente, EXATAMENTE uma opção de: ${materials.join(", ")}",`,
+      '  "description": "string — 2 a 3 frases elegantes, femininas e persuasivas focadas em caimento, ocasião de uso e conforto, SEM inventar medidas em cm ou composição percentual exata",',
+      '  "characteristics": [',
+      '    { "label": "string (ex.: Tecido, Modelagem, Caimento, Cor, Decote, Comprimento, Ocasião)", "value": "string — apenas atributos visíveis, sem inventar tamanhos numéricos" }',
+      `  ]${estimatePrice ? "," : ""} // de 3 a 5 itens`,
+      ...(priceSchemaField ? [priceSchemaField] : []),
+      "}",
+    ].join("\n");
+  }
+
+  if (niche === "calcados") {
+    return [
+      `Você é a especialista em curadoria de calçados e copywriting da loja brasileira '${STORE_CONFIG.name}'.`,
+      "Analise cuidadosamente a foto do calçado e responda EXCLUSIVAMENTE com um objeto JSON válido em português do Brasil (pt-BR), sem markdown, sem comentários e sem texto extra.",
+      "",
+      "Diretrizes obrigatórias de Calçados:",
+      `- Identifique exclusivamente calçados (${NICHE_CATALOG_DEFAULTS.calcados.categories.join(", ")}) escolhendo estritamente uma opção da lista de categorias fornecida.`,
+      `- Preencha o campo 'material' com o material aparente do calçado (${NICHE_CATALOG_DEFAULTS.calcados.materials.join(", ")}) escolhendo estritamente uma opção da lista de materiais fornecida.`,
+      "- Gere uma descrição elegante, envolvente e persuasiva focada em conforto, calce, estilo e ocasião de uso.",
+      "- Nunca classifique o produto como joia, bijuteria ou acessório.",
+      ...(priceLine ? [priceLine] : []),
+      "",
+      "Schema JSON obrigatório:",
+      "{",
+      '  "name": "string — nome comercial elegante, curto e atrativo em português (ex.: Sandália Salto Bloco Napa Caramelo), sem SKU, preço ou nome da loja",',
+      `  "category": "string — EXATAMENTE uma opção de: ${categories.join(", ")}",`,
+      `  "material": "string — material aparente, EXATAMENTE uma opção de: ${materials.join(", ")}",`,
+      '  "description": "string — 2 a 3 frases elegantes e persuasivas focadas em conforto, estilo, calce e ocasião de uso, SEM inventar altura exata de salto em cm ou garantia",',
+      '  "characteristics": [',
+      '    { "label": "string (ex.: Material, Cor, Bico, Salto, Fechamento, Estilo, Ocasião)", "value": "string — apenas atributos visíveis, sem inventar medidas numéricas" }',
+      `  ]${estimatePrice ? "," : ""} // de 3 a 5 itens`,
+      ...(priceSchemaField ? [priceSchemaField] : []),
+      "}",
+    ].join("\n");
+  }
+
   return [
-    "Você é a especialista em curadoria e copywriting da loja brasileira de joias e acessórios femininos 'Use Camile Acessórios'.",
+    `Você é a especialista em curadoria e copywriting da loja brasileira de joias e acessórios femininos '${STORE_CONFIG.name}'.`,
     "Analise cuidadosamente a foto do acessório e responda EXCLUSIVAMENTE com um objeto JSON válido em português do Brasil (pt-BR), sem markdown, sem comentários e sem texto extra.",
+    ...(priceLine ? ["", priceLine] : []),
     "",
     "Schema JSON obrigatório:",
     "{",
@@ -400,12 +569,20 @@ function buildSystemPrompt(categories: string[], materials: string[]): string {
     '  "description": "string — 2 a 3 frases elegantes, femininas e persuasivas destacando estilo, brilho e versatilidade, SEM inventar medidas em cm/mm, peso ou garantia",',
     '  "characteristics": [',
     '    { "label": "string (ex.: Acabamento, Cor, Pedra, Fecho, Estilo, Ocasião)", "value": "string — apenas atributos visíveis, sem inventar tamanhos numéricos" }',
-    "  ] // de 3 a 5 itens",
+    `  ]${estimatePrice ? "," : ""} // de 3 a 5 itens`,
+    ...(priceSchemaField ? [priceSchemaField] : []),
     "}",
   ].join("\n");
 }
 
-function buildGeminiResponseSchema(categories: string[], materials: string[]) {
+function buildGeminiResponseSchema(
+  categories: string[],
+  materials: string[],
+  niche: StoreNiche,
+  estimatePrice = false,
+) {
+  const isModa = niche === "moda";
+  const isCalcados = niche === "calcados";
   return {
     type: "OBJECT",
     properties: {
@@ -421,12 +598,19 @@ function buildGeminiResponseSchema(categories: string[], materials: string[]) {
       material: {
         type: "STRING",
         enum: materials,
-        description: "Material exato escolhido dentre as opções disponíveis.",
+        description: isModa
+          ? "Tecido aparente exato escolhido dentre as opções disponíveis."
+          : isCalcados
+            ? "Material aparente do calçado escolhido dentre as opções disponíveis."
+            : "Material exato escolhido dentre as opções disponíveis.",
       },
       description: {
         type: "STRING",
-        description:
-          "Descrição de 2 a 3 frases elegantes, femininas e persuasivas sem inventar medidas, peso ou garantia.",
+        description: isModa
+          ? "Descrição de 2 a 3 frases elegantes focadas em caimento, ocasião de uso e conforto, sem inventar medidas."
+          : isCalcados
+            ? "Descrição de 2 a 3 frases elegantes focadas em conforto, calce e ocasião de uso, sem inventar medidas."
+            : "Descrição de 2 a 3 frases elegantes, femininas e persuasivas sem inventar medidas, peso ou garantia.",
       },
       characteristics: {
         type: "ARRAY",
@@ -441,8 +625,24 @@ function buildGeminiResponseSchema(categories: string[], materials: string[]) {
           required: ["label", "value"],
         },
       },
+      ...(estimatePrice
+        ? {
+            estimatedPrice: {
+              type: "NUMBER",
+              description:
+                "Preço de varejo realista para o mercado brasileiro em reais, sempre terminado em .90.",
+            },
+          }
+        : {}),
     },
-    required: ["name", "category", "material", "description", "characteristics"],
+    required: [
+      "name",
+      "category",
+      "material",
+      "description",
+      "characteristics",
+      ...(estimatePrice ? ["estimatedPrice"] : []),
+    ],
   };
 }
 
@@ -477,10 +677,26 @@ function extractJsonObject(rawText: string): Record<string, unknown> | null {
   return null;
 }
 
+function parseEstimatedPrice(raw: unknown): number | null {
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) && raw > 0 ? toCommercialPrice(raw) : null;
+  }
+  if (typeof raw === "string") {
+    const cleaned = raw
+      .replace(/[^\d.,]/g, "")
+      .replace(/\.(?=\d{3}(?:[.,]|$))/g, "")
+      .replace(",", ".");
+    const parsed = Number(cleaned);
+    return Number.isFinite(parsed) && parsed > 0 ? toCommercialPrice(parsed) : null;
+  }
+  return null;
+}
+
 export function parseAndNormalizeAiJson(
   rawText: string,
   availableCategories: string[],
   availableMaterials: string[],
+  options?: { estimatePrice?: boolean },
 ): AnalyzedProductPayload | null {
   const parsed = extractJsonObject(rawText);
   if (!parsed) return null;
@@ -514,6 +730,9 @@ export function parseAndNormalizeAiJson(
     material: matchAllowedOptionWithFallback(parsed["material"], availableMaterials),
     description,
     characteristics,
+    ...(options?.estimatePrice
+      ? { estimatedPrice: parseEstimatedPrice(parsed["estimatedPrice"]) }
+      : {}),
   };
 }
 
@@ -552,6 +771,8 @@ async function callOpenAiCompatibleVision(params: {
   image: { base64: string; mimeType: string };
   categories: string[];
   materials: string[];
+  niche: StoreNiche;
+  estimatePrice: boolean;
   signal: AbortSignal;
   referer?: string;
 }): Promise<{ ok: true; text: string } | { ok: false; failure: AttemptFailure }> {
@@ -561,8 +782,15 @@ async function callOpenAiCompatibleVision(params: {
   };
   if (params.attempt.provider === "openrouter") {
     if (params.referer) headers["http-referer"] = params.referer;
-    headers["x-title"] = "Use Camile Acessorios";
+    headers["x-title"] = STORE_CONFIG.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   }
+
+  const userInstruction =
+    params.niche === "moda"
+      ? "Analise esta peça de vestuário feminino e retorne apenas o JSON preenchido."
+      : params.niche === "calcados"
+        ? "Analise este calçado e retorne apenas o JSON preenchido."
+        : "Analise esta peça de acessório e retorne apenas o JSON preenchido.";
 
   let res: Response;
   try {
@@ -575,13 +803,21 @@ async function callOpenAiCompatibleVision(params: {
         temperature: 0.4,
         response_format: { type: "json_object" },
         messages: [
-          { role: "system", content: buildSystemPrompt(params.categories, params.materials) },
+          {
+            role: "system",
+            content: buildSystemPrompt(
+              params.categories,
+              params.materials,
+              params.niche,
+              params.estimatePrice,
+            ),
+          },
           {
             role: "user",
             content: [
               {
                 type: "text",
-                text: "Analise esta peça de acessório e retorne apenas o JSON preenchido.",
+                text: userInstruction,
               },
               {
                 type: "image_url",
@@ -630,6 +866,8 @@ async function callGeminiVision(params: {
   image: { base64: string; mimeType: string };
   categories: string[];
   materials: string[];
+  niche: StoreNiche;
+  estimatePrice: boolean;
   signal: AbortSignal;
 }): Promise<{ ok: true; text: string } | { ok: false; failure: AttemptFailure }> {
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(params.attempt.model)}:generateContent?key=${encodeURIComponent(params.attempt.apiKey)}`;
@@ -645,7 +883,14 @@ async function callGeminiVision(params: {
           {
             role: "user",
             parts: [
-              { text: buildSystemPrompt(params.categories, params.materials) },
+              {
+                text: buildSystemPrompt(
+                  params.categories,
+                  params.materials,
+                  params.niche,
+                  params.estimatePrice,
+                ),
+              },
               {
                 inline_data: {
                   mime_type: params.image.mimeType,
@@ -658,7 +903,12 @@ async function callGeminiVision(params: {
         generationConfig: {
           responseMimeType: "application/json",
           temperature: 0.4,
-          responseSchema: buildGeminiResponseSchema(params.categories, params.materials),
+          responseSchema: buildGeminiResponseSchema(
+            params.categories,
+            params.materials,
+            params.niche,
+            params.estimatePrice,
+          ),
         },
       }),
     });
@@ -708,15 +958,18 @@ export async function handleAnalyzeProductRequest(request: Request): Promise<Res
   const resolvedImage = await resolveImageData(body);
   if (resolvedImage instanceof Response) return resolvedImage;
 
-  const availableCategories = sanitizeOptionList(body.availableCategories, [
-    "Anéis",
-    "Colares",
-    "Brincos",
-    "Pulseiras",
-    "Tornozeleiras",
-    "Conjuntos",
-  ]);
-  const availableMaterials = sanitizeOptionList(body.availableMaterials, ["Prata 925", "Semijoia"]);
+  const niche = resolveNiche(body.niche);
+  const estimatePrice = body.estimatePrice === true;
+  const availableCategories = sanitizeOptionsForNiche(
+    body.availableCategories,
+    niche,
+    "categories",
+  );
+  const availableMaterials = sanitizeOptionsForNiche(
+    body.availableMaterials,
+    niche,
+    "materials",
+  );
   const referer = request.headers.get("origin") ?? request.headers.get("referer") ?? undefined;
 
   let hadDemandFailure = false;
@@ -748,6 +1001,8 @@ export async function handleAnalyzeProductRequest(request: Request): Promise<Res
               image: resolvedImage,
               categories: availableCategories,
               materials: availableMaterials,
+              niche,
+              estimatePrice,
               signal: controller.signal,
             })
           : attempt.provider === "openrouter"
@@ -757,6 +1012,8 @@ export async function handleAnalyzeProductRequest(request: Request): Promise<Res
                 image: resolvedImage,
                 categories: availableCategories,
                 materials: availableMaterials,
+                niche,
+                estimatePrice,
                 signal: controller.signal,
                 ...(referer ? { referer } : {}),
               })
@@ -765,6 +1022,8 @@ export async function handleAnalyzeProductRequest(request: Request): Promise<Res
                 image: resolvedImage,
                 categories: availableCategories,
                 materials: availableMaterials,
+                niche,
+                estimatePrice,
                 signal: controller.signal,
               });
 
@@ -781,6 +1040,7 @@ export async function handleAnalyzeProductRequest(request: Request): Promise<Res
         outcome.text,
         availableCategories,
         availableMaterials,
+        { estimatePrice },
       );
       if (!normalized) {
         allAuthFailures = false;

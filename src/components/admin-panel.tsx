@@ -16,7 +16,10 @@ import {
   Sparkles,
   Loader2,
   Gift,
+  Eye,
   EyeOff,
+  Check,
+  Ban,
   X,
   Save,
 } from "lucide-react";
@@ -34,12 +37,30 @@ import {
   type CatalogOptionType,
 } from "@/services/catalogOptionsService";
 import { analyzeProductWithAi, isAnalyzableImageUrl } from "@/services/aiProductService";
-import { getAuthState, signOutAdmin, subscribeAuthChanges } from "@/services/authService";
+import {
+  WRONG_STORE_ACCOUNT_ERROR,
+  getAuthState,
+  signOutAdmin,
+  subscribeAuthChanges,
+} from "@/services/authService";
 import {
   deleteStoreImage,
   uploadOriginalBannerImage,
   uploadStoreImage,
 } from "@/services/storageService";
+import {
+  NICHE_CATALOG_DEFAULTS,
+  STORE_CONFIG,
+  getDefaultBannerAlt,
+  getMaterialLabel,
+  getMaterialLabelPlural,
+  getNicheDisplayName,
+  getQuickSizesForNiche,
+  isFashionNiche,
+  isFootwearNiche,
+  supportsSizes,
+  toggleQuickSize,
+} from "@/config/store.config";
 import {
   money,
   priceOf,
@@ -69,6 +90,8 @@ export function AdminPanel() {
     toggleProductField,
     duplicateProduct,
     deleteProduct,
+    bulkUpdateProducts,
+    bulkDeleteProducts,
     saveBanner,
     reorderBanners,
     deleteBanner,
@@ -86,7 +109,8 @@ export function AdminPanel() {
     materialNames,
     addOption,
     removeOption,
-  } = useCatalogOptions({ enabled: allowed });
+    applyNicheDefaults,
+  } = useCatalogOptions({ enabled: allowed, autoSeed: true });
 
   const [tab, setTab] = useState("Produtos");
   const [query, setQuery] = useState("");
@@ -115,12 +139,31 @@ export function AdminPanel() {
   const [manageCategoryInput, setManageCategoryInput] = useState("");
   const [manageMaterialInput, setManageMaterialInput] = useState("");
   const [removingOptionId, setRemovingOptionId] = useState<string | null>(null);
+  const [applyingDefaults, setApplyingDefaults] = useState(false);
+  const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
+  const [isBulkProcessing, setIsBulkProcessing] = useState(false);
+  const [bulkDeleteConfirmOpen, setBulkDeleteConfirmOpen] = useState(false);
   const [announcementDraft, setAnnouncementDraft] = useState<StoreAnnouncement>(data.announcement);
   const [promoDraft, setPromoDraft] = useState<StorePromotion>(data.promotion);
   const [profileDraft, setProfileDraft] = useState<AdminProfile>(data.profile);
   const pendingUploadsRef = useRef<string[]>([]);
   const lastProductFileRef = useRef<File | null>(null);
   const productModalSessionRef = useRef(0);
+
+  const isModa = isFashionNiche();
+  const isCalcados = isFootwearNiche();
+  const showSizes = supportsSizes();
+  const availableQuickSizes = getQuickSizesForNiche();
+  const nicheDefaults = NICHE_CATALOG_DEFAULTS[STORE_CONFIG.niche];
+  const effectiveCategoryNames =
+    categoryNames.length > 0 ? categoryNames : [...nicheDefaults.categories];
+  const effectiveMaterialNames =
+    materialNames.length > 0 ? materialNames : [...nicheDefaults.materials];
+  const materialLabel = getMaterialLabel();
+  const materialLabelLower = materialLabel.toLowerCase();
+  const materialLabelPlural = getMaterialLabelPlural();
+  const materialLabelPluralLower = materialLabelPlural.toLowerCase();
+  const defaultBannerAlt = getDefaultBannerAlt();
 
   const cleanupPendingUploads = (keepUrl?: string) => {
     const toDelete = pendingUploadsRef.current.filter((url) => url && url !== keepUrl);
@@ -142,11 +185,32 @@ export function AdminPanel() {
     setProfileDraft(data.profile);
   }, [data.profile]);
 
+  // Limpa seleções ao sair da aba Produtos
+  useEffect(() => {
+    if (tab !== "Produtos") {
+      setSelectedProductIds([]);
+      setBulkDeleteConfirmOpen(false);
+    }
+  }, [tab]);
+
+  // Remove automaticamente IDs inexistentes da seleção (evita seleções fantasmas)
+  useEffect(() => {
+    const existingIds = new Set(data.products.map((p) => p.id));
+    setSelectedProductIds((prev) => {
+      if (prev.length === 0) return prev;
+      const valid = prev.filter((id) => existingIds.has(id));
+      return valid.length === prev.length ? prev : valid;
+    });
+  }, [data.products]);
+
   useEffect(() => {
     let active = true;
     void getAuthState().then((state) => {
       if (!active) return;
       if (!state.authenticated) {
+        if (state.unauthorizedStore) {
+          toast.error(WRONG_STORE_ACCOUNT_ERROR, { id: "wrong-store-account" });
+        }
         void navigate({ to: "/login" });
       } else {
         setAllowed(true);
@@ -156,6 +220,9 @@ export function AdminPanel() {
     const unsubscribe = subscribeAuthChanges((state) => {
       if (!state.authenticated) {
         setAllowed(false);
+        if (state.unauthorizedStore) {
+          toast.error(WRONG_STORE_ACCOUNT_ERROR, { id: "wrong-store-account" });
+        }
         void navigate({ to: "/login" });
       }
     });
@@ -179,8 +246,12 @@ export function AdminPanel() {
 
     setSaving(true);
     try {
-      await saveProduct(edit);
-      cleanupPendingUploads(edit.image_url);
+      const productToSave: Product = {
+        ...edit,
+        sizes: showSizes ? edit.sizes : [],
+      };
+      await saveProduct(productToSave);
+      cleanupPendingUploads(productToSave.image_url);
       setEdit(null);
       toast.success("Produto salvo!");
     } catch (err) {
@@ -195,6 +266,53 @@ export function AdminPanel() {
       await toggleProductField(p, key);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Erro ao atualizar produto.");
+    }
+  };
+
+  const toggleSelectProduct = (id: string) => {
+    setSelectedProductIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
+    );
+  };
+
+  const handleBulkUpdate = async (
+    patch: { in_stock?: boolean; active?: boolean },
+    singularLabel: string,
+    pluralLabel: string,
+  ) => {
+    if (selectedProductIds.length === 0 || isBulkProcessing) return;
+    const count = selectedProductIds.length;
+    setIsBulkProcessing(true);
+    try {
+      await bulkUpdateProducts(selectedProductIds, patch);
+      setSelectedProductIds([]);
+      toast.success(
+        count === 1
+          ? `1 produto marcado como ${singularLabel}.`
+          : `${count} produtos marcados como ${pluralLabel}.`,
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Erro ao atualizar produtos em lote.");
+    } finally {
+      setIsBulkProcessing(false);
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedProductIds.length === 0 || isBulkProcessing) return;
+    const count = selectedProductIds.length;
+    setIsBulkProcessing(true);
+    try {
+      await bulkDeleteProducts(selectedProductIds);
+      setBulkDeleteConfirmOpen(false);
+      setSelectedProductIds([]);
+      toast.success(
+        count === 1 ? "1 produto excluído com sucesso." : `${count} produtos excluídos com sucesso.`,
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Erro ao excluir produtos em lote.");
+    } finally {
+      setIsBulkProcessing(false);
     }
   };
 
@@ -213,9 +331,9 @@ export function AdminPanel() {
     }
 
     const availableCategories =
-      formCategories.length > 0 ? formCategories : mergeOptionValues(categoryNames);
+      formCategories.length > 0 ? formCategories : mergeOptionValues(effectiveCategoryNames);
     const availableMaterials =
-      formMaterials.length > 0 ? formMaterials : mergeOptionValues(materialNames);
+      formMaterials.length > 0 ? formMaterials : mergeOptionValues(effectiveMaterialNames);
 
     setAnalyzingAi(true);
     try {
@@ -224,6 +342,7 @@ export function AdminPanel() {
         imageUrl: urlToUse,
         availableCategories,
         availableMaterials,
+        niche: STORE_CONFIG.niche,
       });
 
       if (sessionId !== productModalSessionRef.current) return;
@@ -232,11 +351,11 @@ export function AdminPanel() {
         if (!prev) return prev;
 
         const validCategories = ensureOptionPresent(
-          mergeOptionValues(categoryNames, prev.category ? [prev.category] : []),
+          mergeOptionValues(effectiveCategoryNames, prev.category ? [prev.category] : []),
           prev.category,
         );
         const validMaterials = ensureOptionPresent(
-          mergeOptionValues(materialNames, prev.material ? [prev.material] : []),
+          mergeOptionValues(effectiveMaterialNames, prev.material ? [prev.material] : []),
           prev.material,
         );
 
@@ -289,7 +408,7 @@ export function AdminPanel() {
         };
       });
 
-      toast.success("Campos preenchidos com IA! Revise o material e informe o preço.");
+      toast.success(`Campos preenchidos com IA! Revise o ${materialLabelLower} e informe o preço.`);
     } catch (err) {
       if (sessionId !== productModalSessionRef.current) return;
       toast.error(err instanceof Error ? err.message : "Erro ao analisar a peça com IA.");
@@ -356,7 +475,7 @@ export function AdminPanel() {
       );
       setInlineOptionType(null);
       setInlineOptionValue("");
-      toast.success(type === "category" ? "Categoria adicionada!" : "Material adicionado!");
+      toast.success(type === "category" ? "Categoria adicionada!" : `${materialLabel} adicionado!`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Não foi possível salvar a opção.");
     } finally {
@@ -371,7 +490,7 @@ export function AdminPanel() {
       await addOption(type, rawValue);
       if (type === "category") setManageCategoryInput("");
       else setManageMaterialInput("");
-      toast.success(type === "category" ? "Categoria adicionada!" : "Material adicionado!");
+      toast.success(type === "category" ? "Categoria adicionada!" : `${materialLabel} adicionado!`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Não foi possível salvar a opção.");
     } finally {
@@ -384,12 +503,32 @@ export function AdminPanel() {
     try {
       await removeOption(id);
       toast.success(
-        type === "category" ? "Categoria removida da lista." : "Material removido da lista.",
+        type === "category"
+          ? "Categoria removida da lista."
+          : `${materialLabel} removido da lista.`,
       );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Erro ao remover opção.");
     } finally {
       setRemovingOptionId(null);
+    }
+  };
+
+  const nicheDisplayLabel = getNicheDisplayName();
+
+  const handleApplyNicheDefaults = async () => {
+    setApplyingDefaults(true);
+    try {
+      await applyNicheDefaults(STORE_CONFIG.niche);
+      setCategory("");
+      setMaterial("");
+      toast.success(`Padrões de ${nicheDisplayLabel} aplicados!`);
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Não foi possível aplicar os padrões do nicho.",
+      );
+    } finally {
+      setApplyingDefaults(false);
     }
   };
 
@@ -401,12 +540,8 @@ export function AdminPanel() {
     setSizeInfo("");
     setInlineOptionType(null);
     setInlineOptionValue("");
-    const defaultCategory = categoryNames.includes("Brincos")
-      ? "Brincos"
-      : (categoryNames[0] ?? "Brincos");
-    const defaultMaterial = materialNames.includes("Semijoia")
-      ? "Semijoia"
-      : (materialNames[0] ?? "Semijoia");
+    const defaultCategory = effectiveCategoryNames[0] ?? nicheDefaults.categories[0] ?? "";
+    const defaultMaterial = effectiveMaterialNames[0] ?? nicheDefaults.materials[0] ?? "";
     setEdit({
       id: crypto.randomUUID(),
       name: "",
@@ -423,31 +558,32 @@ export function AdminPanel() {
       featured: false,
       in_stock: true,
       characteristics: [],
+      sizes: [],
     });
   };
 
   const filterCategories = mergeOptionValues(
-    categoryNames,
+    effectiveCategoryNames,
     data.products.map((p) => p.category),
   );
   const filterMaterials = mergeOptionValues(
-    materialNames,
+    effectiveMaterialNames,
     data.products.map((p) => p.material),
   );
   const formCategories = ensureOptionPresent(
-    mergeOptionValues(categoryNames, edit?.category ? [edit.category] : []),
+    mergeOptionValues(effectiveCategoryNames, edit?.category ? [edit.category] : []),
     edit?.category,
   );
   const formMaterials = ensureOptionPresent(
-    mergeOptionValues(materialNames, edit?.material ? [edit.material] : []),
+    mergeOptionValues(effectiveMaterialNames, edit?.material ? [edit.material] : []),
     edit?.material,
   );
   const bannerFilterOptions = ensureOptionPresent(
     [
       "Promoções",
       ...mergeOptionValues([
-        ...materialNames,
-        ...categoryNames,
+        ...effectiveMaterialNames,
+        ...effectiveCategoryNames,
         ...data.products.flatMap((p) => [p.material, p.category]),
       ]),
     ],
@@ -464,6 +600,24 @@ export function AdminPanel() {
       (!sale || p.is_on_sale),
   );
 
+  const selectedIdSet = new Set(selectedProductIds);
+  const visibleProductIds = list.map((p) => p.id);
+  const selectedVisibleCount = visibleProductIds.filter((id) => selectedIdSet.has(id)).length;
+  const allVisibleSelected =
+    visibleProductIds.length > 0 && selectedVisibleCount === visibleProductIds.length;
+  const someVisibleSelected =
+    selectedVisibleCount > 0 && selectedVisibleCount < visibleProductIds.length;
+
+  const toggleSelectAllVisible = () => {
+    if (visibleProductIds.length === 0) return;
+    if (allVisibleSelected) {
+      const visibleSet = new Set(visibleProductIds);
+      setSelectedProductIds((prev) => prev.filter((id) => !visibleSet.has(id)));
+    } else {
+      setSelectedProductIds((prev) => Array.from(new Set([...prev, ...visibleProductIds])));
+    }
+  };
+
   if (!allowed) return null;
 
   return (
@@ -472,7 +626,7 @@ export function AdminPanel() {
         <div className="shell h-17 md:h-20 flex items-center justify-between gap-3">
           <img
             src="/logo.png"
-            alt="Use Camile Acessórios"
+            alt={STORE_CONFIG.name}
             className="h-11 sm:h-12 md:h-14 w-auto shrink-0 object-contain"
           />
           <div className="flex gap-2 shrink-0">
@@ -597,11 +751,11 @@ export function AdminPanel() {
                 ))}
               </select>
               <select
-                aria-label="Material"
+                aria-label={materialLabel}
                 value={material}
                 onChange={(e) => setMaterial(e.target.value)}
               >
-                <option value="">Todos os materiais</option>
+                <option value="">Todos os {materialLabelPluralLower}</option>
                 {filterMaterials.map((m) => (
                   <option key={m} value={m}>
                     {m}
@@ -623,7 +777,32 @@ export function AdminPanel() {
                 Só promoções
               </label>
             </div>
-            <div className="mt-3 flex justify-end">
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/25 px-3.5 py-2.5">
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="flex items-center gap-2 text-xs font-medium text-foreground cursor-pointer">
+                  <input
+                    type="checkbox"
+                    aria-label="Selecionar todos"
+                    checked={allVisibleSelected}
+                    ref={(el) => {
+                      if (el) el.indeterminate = someVisibleSelected;
+                    }}
+                    disabled={list.length === 0 || isBulkProcessing}
+                    onChange={toggleSelectAllVisible}
+                  />
+                  <span>Selecionar todos{list.length > 0 ? ` (${list.length})` : ""}</span>
+                </label>
+                {selectedProductIds.length > 0 && (
+                  <button
+                    type="button"
+                    disabled={isBulkProcessing}
+                    onClick={() => setSelectedProductIds([])}
+                    className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    Limpar seleção
+                  </button>
+                )}
+              </div>
               <Button
                 type="button"
                 variant="ghost"
@@ -632,109 +811,142 @@ export function AdminPanel() {
                 onClick={() => setManageOptionsOpen(true)}
               >
                 <SlidersHorizontal size={13} />
-                Gerenciar categorias e materiais
+                Gerenciar categorias e {materialLabelPluralLower}
               </Button>
             </div>
-            <div className="mt-6">
-              {list.map((p) => (
-                <div className="admin-table" key={p.id}>
-                  <img
-                    src={p.image_url}
-                    alt={p.name}
-                    className="w-full aspect-square object-cover rounded"
-                  />
-                  <div>
-                    <p className="text-sm font-medium">{p.name}</p>
-                    <p className="text-[11px] text-muted-foreground mt-1">
-                      {p.sku} · {p.category} · {p.material}
-                    </p>
-                    <div className="flex gap-3 mt-3 flex-wrap">
-                      {(["active", "featured", "in_stock"] as const).map((key, i) => (
-                        <label key={key} className="flex items-center gap-1 text-[10px]">
-                          <input
-                            type="checkbox"
-                            checked={p[key]}
-                            onChange={() => void handleToggleProduct(p, key)}
-                          />
-                          {["Ativo", "Destaque", "Disponível"][i]}
-                        </label>
-                      ))}
+            <div className={`mt-6 ${selectedProductIds.length > 0 ? "pb-28" : ""}`}>
+              {list.map((p) => {
+                const isSelected = selectedIdSet.has(p.id);
+                return (
+                  <div
+                    className={`admin-table rounded-lg px-3 transition-colors ${
+                      isSelected
+                        ? "border border-primary bg-primary/5 ring-1 ring-primary/20 my-1"
+                        : ""
+                    }`}
+                    key={p.id}
+                  >
+                    <div className="relative">
+                      <img
+                        src={p.image_url}
+                        alt={p.name}
+                        className="w-full aspect-square object-cover rounded"
+                      />
+                      <label
+                        onClick={(e) => e.stopPropagation()}
+                        title={`Selecionar ${p.name}`}
+                        className="absolute top-1 left-1 flex items-center justify-center rounded bg-background/95 p-0.5 shadow-xs border border-border/80 cursor-pointer"
+                      >
+                        <input
+                          type="checkbox"
+                          aria-label={`Selecionar ${p.name}`}
+                          checked={isSelected}
+                          disabled={isBulkProcessing}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={() => toggleSelectProduct(p.id)}
+                          className="h-4 w-4 cursor-pointer"
+                        />
+                      </label>
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium">{p.name}</p>
+                      <p className="text-[11px] text-muted-foreground mt-1">
+                        {p.sku ? `${p.sku} · ` : ""}
+                        {p.category} · {p.material}
+                        {showSizes && p.sizes.length > 0 ? ` · Tam: ${p.sizes.join(", ")}` : ""}
+                      </p>
+                      <div className="flex gap-3 mt-3 flex-wrap">
+                        {(["active", "featured", "in_stock"] as const).map((key, i) => (
+                          <label key={key} className="flex items-center gap-1 text-[10px]">
+                            <input
+                              type="checkbox"
+                              checked={p[key]}
+                              disabled={isBulkProcessing}
+                              onChange={() => void handleToggleProduct(p, key)}
+                            />
+                            {["Ativo", "Destaque", "Disponível"][i]}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="text-xs">
+                      {p.is_on_sale && (
+                        <del className="text-muted-foreground block">{money(p.price)}</del>
+                      )}
+                      <strong>{money(priceOf(p))}</strong>
+                      {p.is_on_sale && (
+                        <p className="text-primary text-[10px] mt-1">
+                          {Math.round((1 - p.sale_price / p.price) * 100)}% OFF
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex gap-2 flex-wrap">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        title="Copiar link para Stories"
+                        aria-label={`Copiar link de ${p.name}`}
+                        onClick={async () => {
+                          await navigator.clipboard.writeText(
+                            `${window.location.origin}/?produto=${p.id}`,
+                          );
+                          toast.success("Link copiado para os Stories!");
+                        }}
+                      >
+                        <LinkIcon />
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        title="Editar"
+                        aria-label={`Editar ${p.name}`}
+                        onClick={() => {
+                          productModalSessionRef.current += 1;
+                          lastProductFileRef.current = null;
+                          setAnalyzingAi(false);
+                          setAutoFillOnUpload(false);
+                          setEdit({
+                            ...structuredClone(p),
+                            sizes: showSizes && Array.isArray(p.sizes) ? [...p.sizes] : [],
+                          });
+                          setSizeInfo("");
+                          setInlineOptionType(null);
+                          setInlineOptionValue("");
+                        }}
+                      >
+                        <Pencil />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        title="Duplicar"
+                        aria-label={`Duplicar ${p.name}`}
+                        onClick={async () => {
+                          try {
+                            await duplicateProduct(p);
+                            toast.success("Produto duplicado como inativo.");
+                          } catch (err) {
+                            toast.error(
+                              err instanceof Error ? err.message : "Erro ao duplicar produto.",
+                            );
+                          }
+                        }}
+                      >
+                        <Copy />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        title="Excluir"
+                        aria-label={`Excluir ${p.name}`}
+                        onClick={() => setConfirm({ kind: "products", id: p.id })}
+                      >
+                        <Trash2 />
+                      </Button>
                     </div>
                   </div>
-                  <div className="text-xs">
-                    {p.is_on_sale && (
-                      <del className="text-muted-foreground block">{money(p.price)}</del>
-                    )}
-                    <strong>{money(priceOf(p))}</strong>
-                    {p.is_on_sale && (
-                      <p className="text-primary text-[10px] mt-1">
-                        {Math.round((1 - p.sale_price / p.price) * 100)}% OFF
-                      </p>
-                    )}
-                  </div>
-                  <div className="flex gap-2 flex-wrap">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      title="Copiar link para Stories"
-                      aria-label={`Copiar link de ${p.name}`}
-                      onClick={async () => {
-                        await navigator.clipboard.writeText(
-                          `${window.location.origin}/?produto=${p.id}`,
-                        );
-                        toast.success("Link copiado para os Stories!");
-                      }}
-                    >
-                      <LinkIcon />
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      title="Editar"
-                      aria-label={`Editar ${p.name}`}
-                      onClick={() => {
-                        productModalSessionRef.current += 1;
-                        lastProductFileRef.current = null;
-                        setAnalyzingAi(false);
-                        setAutoFillOnUpload(false);
-                        setEdit(structuredClone(p));
-                        setSizeInfo("");
-                        setInlineOptionType(null);
-                        setInlineOptionValue("");
-                      }}
-                    >
-                      <Pencil />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      title="Duplicar"
-                      aria-label={`Duplicar ${p.name}`}
-                      onClick={async () => {
-                        try {
-                          await duplicateProduct(p);
-                          toast.success("Produto duplicado como inativo.");
-                        } catch (err) {
-                          toast.error(
-                            err instanceof Error ? err.message : "Erro ao duplicar produto.",
-                          );
-                        }
-                      }}
-                    >
-                      <Copy />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      title="Excluir"
-                      aria-label={`Excluir ${p.name}`}
-                      onClick={() => setConfirm({ kind: "products", id: p.id })}
-                    >
-                      <Trash2 />
-                    </Button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
             {!loading && !list.length && (
               <p className="text-sm text-muted-foreground text-center py-12">
@@ -816,7 +1028,7 @@ export function AdminPanel() {
                 <span
                   className={`inline-flex items-center rounded-full px-3 py-1 text-[11px] font-medium border ${
                     promoDraft.promo_active
-                      ? "bg-[#C91E7C]/10 text-[#C91E7C] border-[#C91E7C]/25"
+                      ? "bg-primary/10 text-primary border-primary/25"
                       : "bg-muted text-muted-foreground border-border"
                   }`}
                 >
@@ -944,7 +1156,7 @@ export function AdminPanel() {
                     id: crypto.randomUUID(),
                     image_url: "",
                     mobile_image_url: null,
-                    alt: "Banner Use Camile Acessórios",
+                    alt: defaultBannerAlt,
                     active: true,
                     filter: "",
                     display_order: data.banners.length,
@@ -962,7 +1174,7 @@ export function AdminPanel() {
               >
                 <img
                   src={b.image_url}
-                  alt={b.alt || "Banner Use Camile Acessórios"}
+                  alt={b.alt || defaultBannerAlt}
                   className="w-full h-20 object-cover"
                 />
                 <div>
@@ -1268,7 +1480,13 @@ export function AdminPanel() {
                         type="text"
                         aria-label="Nova categoria"
                         className="text-base h-10"
-                        placeholder="Ex.: Tornozeleiras"
+                        placeholder={
+                          isModa
+                            ? "Ex.: Blazers, Jaquetas"
+                            : isCalcados
+                              ? "Ex.: Scarpins, Mules"
+                              : "Ex.: Tornozeleiras"
+                        }
                         value={inlineOptionValue}
                         onChange={(e) => setInlineOptionValue(e.target.value)}
                         onKeyDown={(e) => {
@@ -1311,7 +1529,7 @@ export function AdminPanel() {
                 <div className="space-y-2">
                   <div className="flex items-center justify-between gap-2">
                     <label htmlFor="product-material" className="text-xs text-muted-foreground">
-                      Material
+                      {materialLabel}
                     </label>
                     <button
                       type="button"
@@ -1339,9 +1557,15 @@ export function AdminPanel() {
                     <div className="rounded-md border bg-muted/60 p-2.5 space-y-2">
                       <input
                         type="text"
-                        aria-label="Novo material"
+                        aria-label={`Novo ${materialLabelLower}`}
                         className="text-base h-10"
-                        placeholder="Ex.: Aço Inox, Ródio Branco"
+                        placeholder={
+                          isModa
+                            ? "Ex.: Alfaiataria, Linho, Crepe"
+                            : isCalcados
+                              ? "Ex.: Couro, Camurça, Napa"
+                              : "Ex.: Aço Inox, Ródio Branco"
+                        }
                         value={inlineOptionValue}
                         onChange={(e) => setInlineOptionValue(e.target.value)}
                         onKeyDown={(e) => {
@@ -1392,6 +1616,57 @@ export function AdminPanel() {
                   Gerenciar opções
                 </button>
               </div>
+              {showSizes && (
+                <div className="space-y-2.5 rounded-lg border bg-muted/25 p-3.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs font-medium text-foreground">
+                      Tamanhos disponíveis (opcional)
+                    </p>
+                    {edit.sizes.length > 0 && (
+                      <button
+                        type="button"
+                        className="text-[11px] font-medium text-muted-foreground hover:text-destructive transition-colors cursor-pointer"
+                        onClick={() => setEdit({ ...edit, sizes: [] })}
+                      >
+                        Limpar ({edit.sizes.length})
+                      </button>
+                    )}
+                  </div>
+                  <div
+                    className="flex flex-wrap gap-2"
+                    role="group"
+                    aria-label="Tamanhos disponíveis"
+                  >
+                    {availableQuickSizes.map((size) => {
+                      const selected = edit.sizes.includes(size);
+                      return (
+                        <button
+                          key={size}
+                          type="button"
+                          aria-pressed={selected}
+                          onClick={() =>
+                            setEdit({
+                              ...edit,
+                              sizes: toggleQuickSize(edit.sizes, size),
+                            })
+                          }
+                          className={`min-h-8 min-w-10 rounded-md border px-3 py-1 text-xs font-medium transition-colors cursor-pointer ${
+                            selected
+                              ? "border-primary bg-primary text-primary-foreground"
+                              : "border-border bg-background text-foreground hover:border-primary/60 hover:text-primary"
+                          }`}
+                        >
+                          {size}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    Selecione os tamanhos disponíveis para esta peça ou deixe vazio se não houver
+                    variação de tamanho.
+                  </p>
+                </div>
+              )}
               <div className="flex gap-4 flex-wrap">
                 {(["active", "featured", "in_stock"] as const).map((key, i) => (
                   <label className="flex gap-2 items-center" key={key}>
@@ -1735,7 +2010,7 @@ export function AdminPanel() {
                     await saveBanner({
                       ...banner,
                       mobile_image_url: null,
-                      alt: banner.alt.trim() || "Banner Use Camile Acessórios",
+                      alt: banner.alt.trim() || defaultBannerAlt,
                     });
                     cleanupPendingUploads(banner.image_url);
                     setBanner(null);
@@ -1769,8 +2044,10 @@ export function AdminPanel() {
                 if (!confirm) return;
                 setSaving(true);
                 try {
-                  if (confirm.kind === "products") await deleteProduct(confirm.id);
-                  else if (confirm.kind === "banners") await deleteBanner(confirm.id);
+                  if (confirm.kind === "products") {
+                    await deleteProduct(confirm.id);
+                    setSelectedProductIds((prev) => prev.filter((id) => id !== confirm.id));
+                  } else if (confirm.kind === "banners") await deleteBanner(confirm.id);
                   else await deleteCoupon(confirm.id);
                   setConfirm(null);
                   toast.success("Item excluído.");
@@ -1788,11 +2065,39 @@ export function AdminPanel() {
       </Dialog>
       <Dialog open={manageOptionsOpen} onOpenChange={setManageOptionsOpen}>
         <DialogContent className="max-h-[88dvh] overflow-hidden flex flex-col w-[calc(100%-24px)] max-w-lg">
-          <DialogTitle className="font-display text-3xl">Categorias e materiais</DialogTitle>
+          <DialogTitle className="font-display text-3xl">
+            Categorias e {materialLabelPluralLower}
+          </DialogTitle>
           <DialogDescription>
             Adicione ou remova opções da lista de seleção. Produtos já cadastrados mantêm o texto
             salvo mesmo se uma opção for excluída.
           </DialogDescription>
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-primary/20 bg-primary/5 px-3.5 py-2.5">
+            <p className="text-[11px] text-muted-foreground">
+              Substitui as listas atuais pelos padrões de{" "}
+              <strong className="text-foreground">{nicheDisplayLabel}</strong>.
+            </p>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="border-primary/40 text-primary hover:bg-primary hover:text-primary-foreground"
+              disabled={applyingDefaults || savingOption || removingOptionId !== null}
+              onClick={() => void handleApplyNicheDefaults()}
+            >
+              {applyingDefaults ? (
+                <>
+                  <Loader2 size={13} className="animate-spin" />
+                  Aplicando...
+                </>
+              ) : (
+                <>
+                  <Sparkles size={13} />
+                  Aplicar padrões de {nicheDisplayLabel}
+                </>
+              )}
+            </Button>
+          </div>
           <div className="overflow-y-auto min-h-0 space-y-6 pr-1">
             <section className="space-y-3">
               <h3 className="text-xl">Categorias</h3>
@@ -1850,13 +2155,13 @@ export function AdminPanel() {
               </div>
             </section>
             <section className="space-y-3">
-              <h3 className="text-xl">Materiais</h3>
+              <h3 className="text-xl">{materialLabelPlural}</h3>
               <div className="flex gap-2">
                 <input
                   type="text"
-                  aria-label="Adicionar material"
+                  aria-label={`Adicionar ${materialLabelLower}`}
                   className="text-base h-10"
-                  placeholder="Novo material..."
+                  placeholder={`Novo ${materialLabelLower}...`}
                   value={manageMaterialInput}
                   onChange={(e) => setManageMaterialInput(e.target.value)}
                   onKeyDown={(e) => {
@@ -1890,7 +2195,7 @@ export function AdminPanel() {
                       size="icon"
                       className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
                       disabled={removingOptionId === item.id}
-                      aria-label={`Excluir material ${item.name}`}
+                      aria-label={`Excluir ${materialLabelLower} ${item.name}`}
                       onClick={() => void handleRemoveManagedOption(item.id, "material")}
                     >
                       <Trash2 size={14} />
@@ -1899,7 +2204,7 @@ export function AdminPanel() {
                 ))}
                 {materialOptions.length === 0 && (
                   <p className="px-3 py-4 text-xs text-muted-foreground text-center">
-                    Nenhum material cadastrado.
+                    Nenhum {materialLabelLower} cadastrado.
                   </p>
                 )}
               </div>
@@ -1968,11 +2273,142 @@ export function AdminPanel() {
           </Button>
         </DialogContent>
       </Dialog>
+      <Dialog
+        open={bulkDeleteConfirmOpen}
+        onOpenChange={(v) => {
+          if (!v && !isBulkProcessing) setBulkDeleteConfirmOpen(false);
+        }}
+      >
+        <DialogContent>
+          <DialogTitle>Excluir produtos selecionados?</DialogTitle>
+          <DialogDescription>
+            Tem certeza que deseja excluir {selectedProductIds.length} produto(s) selecionado(s)?
+            Essa ação não pode ser desfeita.
+          </DialogDescription>
+          <div className="flex flex-wrap justify-end gap-3 mt-2">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={isBulkProcessing}
+              onClick={() => setBulkDeleteConfirmOpen(false)}
+            >
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={isBulkProcessing}
+              onClick={() => void handleBulkDelete()}
+            >
+              {isBulkProcessing ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" />
+                  Excluindo...
+                </>
+              ) : (
+                <>
+                  <Trash2 size={14} />
+                  Excluir ({selectedProductIds.length})
+                </>
+              )}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+      {tab === "Produtos" && selectedProductIds.length > 0 && (
+        <div
+          role="region"
+          aria-label="Ações em lote para produtos selecionados"
+          className="fixed inset-x-0 bottom-0 z-40 border-t border-primary/25 bg-background/95 backdrop-blur shadow-lg"
+        >
+          <div className="shell py-3 flex flex-col md:flex-row md:items-center md:justify-between gap-2.5">
+            <div className="flex items-center justify-between md:justify-start gap-3">
+              <span className="inline-flex items-center gap-2 text-xs font-semibold text-foreground">
+                {isBulkProcessing && <Loader2 size={14} className="animate-spin text-primary" />}
+                <span className="rounded-full bg-primary/15 px-2.5 py-0.5 text-primary">
+                  {selectedProductIds.length} selecionado(s)
+                </span>
+              </span>
+              <button
+                type="button"
+                disabled={isBulkProcessing}
+                onClick={() => setSelectedProductIds([])}
+                className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors cursor-pointer disabled:opacity-50"
+              >
+                <X size={13} />
+                Limpar
+              </button>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={isBulkProcessing}
+                onClick={() => void handleBulkUpdate({ in_stock: true }, "disponível", "disponíveis")}
+              >
+                <Check size={14} />
+                Disponível
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={isBulkProcessing}
+                onClick={() =>
+                  void handleBulkUpdate({ in_stock: false }, "indisponível", "indisponíveis")
+                }
+              >
+                <Ban size={14} />
+                Indisponível
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={isBulkProcessing}
+                onClick={() =>
+                  void handleBulkUpdate({ active: true }, "ativo na vitrine", "ativos na vitrine")
+                }
+              >
+                <Eye size={14} />
+                Ativar
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={isBulkProcessing}
+                onClick={() =>
+                  void handleBulkUpdate(
+                    { active: false },
+                    "desativado da vitrine",
+                    "desativados da vitrine",
+                  )
+                }
+              >
+                <EyeOff size={14} />
+                Desativar
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="destructive"
+                disabled={isBulkProcessing}
+                onClick={() => setBulkDeleteConfirmOpen(true)}
+              >
+                <Trash2 size={14} />
+                Excluir
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
       <BatchImportDialog
         open={batchOpen}
         onOpenChange={setBatchOpen}
-        categoryNames={categoryNames}
-        materialNames={materialNames}
+        categoryNames={effectiveCategoryNames}
+        materialNames={effectiveMaterialNames}
         saveProduct={saveProduct}
       />
     </main>

@@ -3,16 +3,22 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { ArrowLeft, ArrowRight, LockKeyhole } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { STORE_CONFIG } from "@/config/store.config";
 import { isSupabaseConfigured } from "@/lib/supabase";
-import { enterDemoSession, getAuthState, signInAdmin } from "@/services/authService";
+import {
+  WRONG_STORE_ACCOUNT_ERROR,
+  enterDemoSession,
+  getAuthState,
+  signInAdmin,
+} from "@/services/authService";
 
 export const Route = createFileRoute("/login")({
   head: () => ({
     meta: [
-      { title: "Acesso ao painel | Use Camile Acessórios" },
-      { name: "description", content: "Acesso restrito ao painel da Use Camile Acessórios." },
-      { property: "og:title", content: "Painel Use Camile" },
-      { property: "og:description", content: "Área da administradora da Use Camile Acessórios." },
+      { title: `Acesso ao painel | ${STORE_CONFIG.name}` },
+      { name: "description", content: `Acesso restrito ao painel da ${STORE_CONFIG.name}.` },
+      { property: "og:title", content: `Painel ${STORE_CONFIG.name}` },
+      { property: "og:description", content: `Área administrativa da ${STORE_CONFIG.name}.` },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },
       { name: "robots", content: "noindex, nofollow" },
@@ -30,8 +36,11 @@ function Login() {
   useEffect(() => {
     let active = true;
     void getAuthState().then((state) => {
-      if (active && state.authenticated) {
+      if (!active) return;
+      if (state.authenticated) {
         void navigate({ to: "/admin" });
+      } else if (state.unauthorizedStore) {
+        toast.error(WRONG_STORE_ACCOUNT_ERROR, { id: "wrong-store-account" });
       }
     });
     return () => {
@@ -64,12 +73,12 @@ function Login() {
       <div className="w-full max-w-sm text-center">
         <img
           src="/logo.png"
-          alt="Use Camile Acessórios"
+          alt={STORE_CONFIG.name}
           className="h-20 sm:h-24 w-auto mx-auto mb-6 object-contain"
         />
         <LockKeyhole size={22} className="mx-auto text-primary mb-4" />
         <h1 className="text-4xl">Seu espaço de cuidado</h1>
-        <p className="text-muted-foreground text-xs mt-3 mb-8">Painel da Use Camile Acessórios</p>
+        <p className="text-muted-foreground text-xs mt-3 mb-8">Painel da {STORE_CONFIG.name}</p>
         <form onSubmit={handleSubmit} className="text-left space-y-5">
           <label>
             E-mail

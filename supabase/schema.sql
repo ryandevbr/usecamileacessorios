@@ -1,6 +1,7 @@
 -- ============================================================================
--- Use Camile Acessórios — Schema completo para Supabase (PostgreSQL + Storage)
--- Execute este arquivo no SQL Editor do projeto Supabase.
+-- Template Mestre White-Label Multi-Tenant — Schema completo para Supabase
+-- Isolamento por store_slug (PostgreSQL + Auth + Storage)
+-- Execute este arquivo no SQL Editor do projeto Supabase Central.
 -- ============================================================================
 
 create extension if not exists pgcrypto;
@@ -19,12 +20,13 @@ end;
 $$;
 
 -- ----------------------------------------------------------------------------
--- 2. Tabelas principais
+-- 2. Tabelas principais (isoladas por store_slug)
 -- ----------------------------------------------------------------------------
 
--- Produtos do catálogo (1 foto principal + características em jsonb)
+-- Produtos do catálogo (1 foto principal + características e tamanhos em jsonb)
 create table if not exists public.products (
   id uuid primary key default gen_random_uuid(),
+  store_slug text not null default 'default',
   name text not null check (btrim(name) <> ''),
   sku text not null default '',
   category text not null,
@@ -40,6 +42,8 @@ create table if not exists public.products (
   in_stock boolean not null default true,
   characteristics jsonb not null default '[]'::jsonb
     check (jsonb_typeof(characteristics) = 'array'),
+  sizes jsonb not null default '[]'::jsonb
+    check (jsonb_typeof(sizes) = 'array'),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint products_sale_price_valid
@@ -49,9 +53,10 @@ create table if not exists public.products (
 -- Banners do Hero com ordem de exibição, imagem mobile opcional e filtro opcional
 create table if not exists public.hero_banners (
   id uuid primary key default gen_random_uuid(),
+  store_slug text not null default 'default',
   image_url text not null check (btrim(image_url) <> ''),
   mobile_image_url text,
-  alt text not null default 'Banner Use Camile Acessórios' check (btrim(alt) <> ''),
+  alt text not null default 'Banner da Loja' check (btrim(alt) <> ''),
   active boolean not null default true,
   filter text not null default '',
   display_order integer not null default 0,
@@ -59,9 +64,10 @@ create table if not exists public.hero_banners (
   updated_at timestamptz not null default now()
 );
 
--- Configurações públicas da loja, barra de avisos e espaço de promoções (registro único id = 1)
+-- Configurações públicas por loja (barra de avisos e espaço de promoções)
 create table if not exists public.store_settings (
-  id integer primary key default 1 check (id = 1),
+  id uuid primary key default gen_random_uuid(),
+  store_slug text not null unique,
   announcement_active boolean not null default true,
   announcement_text text not null default '',
   announcement_link text not null default '#vitrine',
@@ -78,9 +84,10 @@ create table if not exists public.store_settings (
   updated_at timestamptz not null default now()
 );
 
--- Cupons de desconto
+-- Cupons de desconto por loja
 create table if not exists public.coupons (
   id uuid primary key default gen_random_uuid(),
+  store_slug text not null default 'default',
   code text not null,
   type text not null check (type in ('percent', 'fixed')),
   value numeric(10, 2) not null check (value > 0),
@@ -96,9 +103,10 @@ create table if not exists public.coupons (
     check (type <> 'percent' or value <= 100)
 );
 
--- Perfil privado da administradora (vinculado ao Supabase Auth)
+-- Perfil privado da administradora (vinculado ao Supabase Auth + store_slug)
 create table if not exists public.admin_profiles (
   id uuid primary key references auth.users (id) on delete cascade,
+  store_slug text not null default 'default',
   name text not null default 'Administradora',
   email text not null default '',
   avatar_url text not null default '',
@@ -106,47 +114,51 @@ create table if not exists public.admin_profiles (
   updated_at timestamptz not null default now()
 );
 
--- Opções dinâmicas do catálogo (categorias e materiais gerenciáveis pelo /admin)
+-- Opções dinâmicas do catálogo por loja (categorias e tecidos/materiais)
 create table if not exists public.catalog_options (
   id uuid primary key default gen_random_uuid(),
+  store_slug text not null default 'default',
   type text not null check (type in ('category', 'material')),
   name text not null check (btrim(name) <> ''),
   created_at timestamptz not null default now()
 );
 
 -- ----------------------------------------------------------------------------
--- 3. Índices
+-- 3. Índices compostos com store_slug
 -- ----------------------------------------------------------------------------
-create index if not exists idx_products_active_featured
-  on public.products (active, featured desc, created_at desc);
+create index if not exists idx_products_store_active_featured
+  on public.products (store_slug, active, featured desc, created_at desc);
 
-create index if not exists idx_products_active_category_material
-  on public.products (category, material)
+create index if not exists idx_products_store_active_category_material
+  on public.products (store_slug, category, material)
   where active = true;
 
-create index if not exists idx_products_sku
-  on public.products (sku)
+create index if not exists idx_products_store_sku
+  on public.products (store_slug, sku)
   where sku <> '';
 
-create index if not exists idx_hero_banners_display_order
-  on public.hero_banners (display_order asc, created_at asc);
+create index if not exists idx_hero_banners_store_display_order
+  on public.hero_banners (store_slug, display_order asc, created_at asc);
 
-create index if not exists idx_hero_banners_active_order
-  on public.hero_banners (display_order asc, created_at asc)
+create index if not exists idx_hero_banners_store_active_order
+  on public.hero_banners (store_slug, display_order asc, created_at asc)
   where active = true;
 
-create unique index if not exists idx_coupons_code_upper_unique
-  on public.coupons (upper(code));
+create unique index if not exists idx_coupons_store_code_upper_unique
+  on public.coupons (store_slug, upper(code));
 
-create index if not exists idx_coupons_active
-  on public.coupons (active)
+create index if not exists idx_coupons_store_active
+  on public.coupons (store_slug, active)
   where active = true;
 
-create unique index if not exists idx_catalog_options_type_name_unique
-  on public.catalog_options (type, lower(btrim(name)));
+create unique index if not exists idx_catalog_options_store_type_name_unique
+  on public.catalog_options (store_slug, type, lower(btrim(name)));
 
-create index if not exists idx_catalog_options_type_created
-  on public.catalog_options (type, created_at asc);
+create index if not exists idx_catalog_options_store_type_created
+  on public.catalog_options (store_slug, type, created_at asc);
+
+create index if not exists idx_admin_profiles_store_slug
+  on public.admin_profiles (store_slug);
 
 -- ----------------------------------------------------------------------------
 -- 4. Triggers de updated_at
@@ -177,28 +189,23 @@ create trigger trg_admin_profiles_updated_at
   for each row execute function public.set_updated_at();
 
 -- ----------------------------------------------------------------------------
--- 5. Registros iniciais padrão (configurações + categorias/materiais)
+-- 5. Registros iniciais padrão (configurações da loja padrão)
+--    A tabela public.catalog_options permanece vazia na criação do banco para
+--    receber o auto-seed da aplicação conforme STORE_CONFIG.niche e store_slug.
 -- ----------------------------------------------------------------------------
-insert into public.store_settings (id, announcement_active, announcement_text, announcement_link)
+insert into public.store_settings (
+  store_slug,
+  announcement_active,
+  announcement_text,
+  announcement_link
+)
 values (
-  1,
+  'default',
   true,
   'Sua primeira compra merece um brilho extra: 10% OFF com PRIMEIRACOMPRA',
   '#vitrine'
 )
-on conflict (id) do nothing;
-
-insert into public.catalog_options (type, name)
-values
-  ('category', 'Anéis'),
-  ('category', 'Colares'),
-  ('category', 'Brincos'),
-  ('category', 'Pulseiras'),
-  ('category', 'Tornozeleiras'),
-  ('category', 'Conjuntos'),
-  ('material', 'Prata 925'),
-  ('material', 'Semijoia')
-on conflict do nothing;
+on conflict (store_slug) do nothing;
 
 -- ----------------------------------------------------------------------------
 -- 6. Permissões de schema e Row Level Security (RLS) nas tabelas
@@ -333,6 +340,7 @@ create policy "Admin pode excluir opcoes do catalogo"
 
 -- ----------------------------------------------------------------------------
 -- 7. Storage: bucket público store-media e políticas em storage.objects
+--    Arquivos organizados por loja: {store_slug}/products/..., {store_slug}/banners/...
 -- ----------------------------------------------------------------------------
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values (

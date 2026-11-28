@@ -138,6 +138,7 @@ describe("POST /api/analyze-product multi-provider cascade", () => {
       body: JSON.stringify({
         imageBase64: SAMPLE_BASE64,
         mimeType: "image/webp",
+        niche: "acessorios",
         availableCategories: ["Brincos", "Colares"],
         availableMaterials: ["Prata 925", "Semijoia"],
       }),
@@ -208,5 +209,182 @@ describe("POST /api/analyze-product multi-provider cascade", () => {
     expect(parsed).not.toBeNull();
     expect(parsed?.category).toBe("Colares");
     expect(parsed?.material).toBe("Semijoia");
+  });
+
+  it("adapts prompt and default options for niche 'moda'", async () => {
+    process.env["GROQ_API_KEY"] = "groq-test";
+
+    let capturedBody = "";
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      capturedBody = typeof init?.body === "string" ? init.body : "";
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  name: "Vestido Midi Linho Natural",
+                  category: "Vestidos",
+                  material: "Linho",
+                  description:
+                    "Vestido midi com caimento fluido e toque fresco, perfeito para almoços ao ar livre e eventos diurnos com máximo conforto.",
+                  characteristics: [
+                    { label: "Tecido", value: "Linho natural" },
+                    { label: "Caimento", value: "Fluido e acinturado" },
+                    { label: "Ocasião", value: "Eventos diurnos e casuais" },
+                  ],
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    globalThis.fetch = fetchMock;
+
+    const req = new Request("http://localhost/api/analyze-product", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        imageBase64: SAMPLE_BASE64,
+        mimeType: "image/webp",
+        niche: "moda",
+        // Even if stale accessories options are passed, moda must strip them and enforce fashion defaults
+        availableCategories: ["Anéis", "Brincos", "Colares"],
+        availableMaterials: ["Prata 925", "Semijoia"],
+      }),
+    });
+
+    const res = await handleAnalyzeProductRequest(req);
+    expect(res.status).toBe(200);
+    expect(capturedBody).toContain("Moda Feminina");
+    expect(capturedBody).toContain("Vestidos");
+    expect(capturedBody).toContain("Alfaiataria");
+    expect(capturedBody).toContain("caimento, ocasião de uso e conforto");
+    expect(capturedBody).not.toContain("Anéis");
+    expect(capturedBody).not.toContain("Brincos");
+    expect(capturedBody).not.toContain("Prata 925");
+    expect(capturedBody).not.toContain("Semijoia");
+
+    const json = (await res.json()) as {
+      data: { name: string; category: string; material: string };
+    };
+    expect(json.data.category).toBe("Vestidos");
+    expect(json.data.material).toBe("Linho");
+  });
+
+  it("adapts prompt and strips accessory terms for niche 'calcados'", async () => {
+    process.env["GROQ_API_KEY"] = "groq-test";
+
+    let capturedBody = "";
+    globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      capturedBody = typeof init?.body === "string" ? init.body : "";
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  name: "Sandália Salto Bloco Napa",
+                  category: "Sandálias",
+                  material: "Napa",
+                  description:
+                    "Sandália confortável de calce macio e estilo atemporal, perfeita para o trabalho e eventos.",
+                  characteristics: [
+                    { label: "Material", value: "Napa" },
+                    { label: "Salto", value: "Bloco" },
+                    { label: "Ocasião", value: "Dia a dia e eventos" },
+                  ],
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const req = new Request("http://localhost/api/analyze-product", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        imageBase64: SAMPLE_BASE64,
+        mimeType: "image/webp",
+        niche: "calcados",
+        availableCategories: ["Anéis", "Brincos", "Colares"],
+        availableMaterials: ["Prata 925", "Semijoia"],
+      }),
+    });
+
+    const res = await handleAnalyzeProductRequest(req);
+    expect(res.status).toBe(200);
+    expect(capturedBody).toContain("Calçados");
+    expect(capturedBody).toContain("Sandálias");
+    expect(capturedBody).toContain("Couro");
+    expect(capturedBody).not.toContain("Anéis");
+    expect(capturedBody).not.toContain("Brincos");
+    expect(capturedBody).not.toContain("Prata 925");
+    expect(capturedBody).not.toContain("Semijoia");
+
+    const json = (await res.json()) as {
+      data: { name: string; category: string; material: string; estimatedPrice?: number | null };
+    };
+    expect(json.data.category).toBe("Sandálias");
+    expect(json.data.material).toBe("Napa");
+    expect(json.data.estimatedPrice).toBeUndefined();
+  });
+
+  it("includes niche price guidance and normalized .90 estimatedPrice when estimatePrice is true", async () => {
+    process.env["GROQ_API_KEY"] = "groq-test";
+
+    let capturedBody = "";
+    globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      capturedBody = typeof init?.body === "string" ? init.body : "";
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  name: "Vestido Longo Linho",
+                  category: "Vestidos",
+                  material: "Linho",
+                  description: "Caimento impecável para dias especiais.",
+                  characteristics: [
+                    { label: "Tecido", value: "Linho" },
+                    { label: "Caimento", value: "Fluido" },
+                    { label: "Ocasião", value: "Eventos" },
+                  ],
+                  estimatedPrice: 174.37,
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const req = new Request("http://localhost/api/analyze-product", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        imageBase64: SAMPLE_BASE64,
+        mimeType: "image/webp",
+        niche: "moda",
+        estimatePrice: true,
+      }),
+    });
+
+    const res = await handleAnalyzeProductRequest(req);
+    expect(res.status).toBe(200);
+    expect(capturedBody).toContain("estimatedPrice");
+    expect(capturedBody).toContain("119.90 e 219.90");
+
+    const json = (await res.json()) as {
+      data: { estimatedPrice?: number | null };
+    };
+    expect(json.data.estimatedPrice).toBe(174.9);
   });
 });

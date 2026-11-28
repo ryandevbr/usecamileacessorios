@@ -1,3 +1,4 @@
+import { STORE_CONFIG, type StoreNiche } from "@/config/store.config";
 import { getAccessToken } from "@/services/authService";
 import { compressImageForAi } from "@/utils/imageCompressor";
 
@@ -12,6 +13,7 @@ export interface AiProductAnalysis {
   material: string;
   description: string;
   characteristics: AiProductCharacteristic[];
+  estimatedPrice?: number | null | undefined;
 }
 
 export interface AiProductMeta {
@@ -24,6 +26,8 @@ export interface AnalyzeProductParams {
   imageUrl?: string;
   availableCategories: string[];
   availableMaterials: string[];
+  niche?: StoreNiche;
+  estimatePrice?: boolean;
 }
 
 interface AnalyzeApiResponse {
@@ -84,9 +88,13 @@ export async function analyzeProductWithAi(
     imageUrl?: string;
     availableCategories: string[];
     availableMaterials: string[];
+    niche: StoreNiche;
+    estimatePrice?: boolean;
   } = {
     availableCategories: params.availableCategories,
     availableMaterials: params.availableMaterials,
+    niche: params.niche ?? STORE_CONFIG.niche,
+    ...(params.estimatePrice ? { estimatePrice: true } : {}),
   };
 
   if (params.file) {

@@ -15,14 +15,38 @@ import {
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import {
+  NICHE_CATALOG_DEFAULTS,
+  STORE_CONFIG,
+  getMaterialLabel,
+  getQuickSizesForNiche,
+  isFashionNiche,
+  isFootwearNiche,
+  supportsSizes,
+  toggleQuickSize,
+} from "@/config/store.config";
 import { money, type Product } from "@/data/catalog";
+import {
+  BATCH_RETRY_ROUNDS,
+  NICHE_FALLBACK_DEMO_PRICE,
+  buildDemoPromoPricing,
+  formatRetryCountdownMessage,
+  toCommercialPrice,
+  type RetryCountdownState,
+} from "@/lib/batch-retry";
 import { normalizeImageFile } from "@/lib/normalize-image";
 import { analyzeProductWithAi } from "@/services/aiProductService";
 import { optionLookupKey } from "@/services/catalogOptionsService";
 import { deleteStoreImage, uploadStoreImage } from "@/services/storageService";
 
 type BatchStep = 1 | 2 | 3;
-type BatchItemStatus = "queued" | "retrying_wait" | "analyzing" | "uploading" | "done" | "failed";
+type BatchItemStatus =
+  | "queued"
+  | "waiting_retry"
+  | "analyzing"
+  | "uploading"
+  | "done"
+  | "failed";
 
 interface BatchItem {
   id: string;
@@ -30,43 +54,55 @@ interface BatchItem {
   originalName: string;
   previewUrl: string;
   status: BatchItemStatus;
-  attempt?: number;
-  uploadedImageUrl?: string;
-  error?: string;
-  productName?: string;
-  resolvedCategory?: string;
-  resolvedMaterial?: string;
+  attempt?: number | undefined;
+  uploadedImageUrl?: string | undefined;
+  error?: string | undefined;
+  productName?: string | undefined;
+  resolvedCategory?: string | undefined;
+  resolvedMaterial?: string | undefined;
+  resolvedPrice?: number | undefined;
+  resolvedSalePrice?: number | undefined;
+  resolvedIsOnSale?: boolean | undefined;
 }
 
-interface RetryCountdownState {
-  round: 2 | 3;
-  secondsLeft: number;
-  failedCount: number;
-}
-
-interface BatchImportDialogProps {
+export interface BatchImportDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   categoryNames: string[];
   materialNames: string[];
   saveProduct: (product: Product) => Promise<void>;
+  /** Opcional para testes: sobrescreve a duração de 1 segundo da contagem regressiva e intervalos */
+  timingScale?: number;
+  /** Opcional para testes: sobrescreve STORE_CONFIG.enableAiDemoPricing */
+  enableAiDemoPricing?: boolean;
 }
-
-export const BATCH_MAX_ATTEMPTS = 3;
-export const BATCH_INITIAL_ITEM_DELAY_MS = 800;
-export const BATCH_RETRY_ROUNDS = [
-  { attempt: 2 as const, waitSeconds: 5, itemDelayMs: 1200 },
-  { attempt: 3 as const, waitSeconds: 8, itemDelayMs: 1500 },
-] as const;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitInterruptible(ms: number, shouldStop: () => boolean): Promise<void> {
+  if (ms <= 0) return;
+  const stepMs = Math.min(100, ms);
+  let elapsed = 0;
+  while (elapsed < ms && !shouldStop()) {
+    const chunk = Math.min(stepMs, ms - elapsed);
+    await sleep(chunk);
+    elapsed += chunk;
+  }
+}
+
 function fallbackProductName(filename: string): string {
   const withoutExt = filename.replace(/\.[^.]+$/, "").trim();
   const cleaned = withoutExt.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
-  return cleaned || "Acessório Use Camile";
+  return (
+    cleaned ||
+    (isFashionNiche()
+      ? `Peça ${STORE_CONFIG.name}`
+      : isFootwearNiche()
+        ? `Calçado ${STORE_CONFIG.name}`
+        : `Acessório ${STORE_CONFIG.name}`)
+  );
 }
 
 function matchCatalogOption(
@@ -84,11 +120,17 @@ export function BatchImportDialog({
   categoryNames,
   materialNames,
   saveProduct,
+  timingScale = 1,
+  enableAiDemoPricing = STORE_CONFIG.enableAiDemoPricing,
 }: BatchImportDialogProps) {
+  const demoPricingEnabled = enableAiDemoPricing === true;
   const [step, setStep] = useState<BatchStep>(1);
   const [price, setPrice] = useState<string>("");
+  const [useAiPricing, setUseAiPricing] = useState<boolean>(demoPricingEnabled);
+  const [simulatePromo, setSimulatePromo] = useState<boolean>(demoPricingEnabled);
   const [selectedCategory, setSelectedCategory] = useState<string>("");
   const [selectedMaterial, setSelectedMaterial] = useState<string>("");
+  const [selectedSizes, setSelectedSizes] = useState<string[]>([]);
   const [autoPublish, setAutoPublish] = useState<boolean>(true);
   const [items, setItems] = useState<BatchItem[]>([]);
   const [converting, setConverting] = useState<{ current: number; total: number } | null>(null);
@@ -96,16 +138,25 @@ export function BatchImportDialog({
   const [currentAttempt, setCurrentAttempt] = useState<number>(1);
   const [retryCountdown, setRetryCountdown] = useState<RetryCountdownState | null>(null);
 
+  const aiPricingActive = demoPricingEnabled && useAiPricing;
+  const simulatePromoActive = demoPricingEnabled && simulatePromo;
+  const showSizes = supportsSizes();
+  const availableQuickSizes = getQuickSizesForNiche();
+  const nicheDefaults = NICHE_CATALOG_DEFAULTS[STORE_CONFIG.niche];
+  const effectiveCategoryNames =
+    categoryNames.length > 0 ? categoryNames : [...nicheDefaults.categories];
+  const effectiveMaterialNames =
+    materialNames.length > 0 ? materialNames : [...nicheDefaults.materials];
+  const materialLabel = getMaterialLabel();
+
   const itemsRef = useRef<BatchItem[]>([]);
   const objectUrlsRef = useRef<Set<string>>(new Set());
   const cancelRequestedRef = useRef<boolean>(false);
   const mountedRef = useRef<boolean>(true);
 
-  const commitItems = (updater: (prev: BatchItem[]) => BatchItem[]) => {
-    const next = updater(itemsRef.current);
-    itemsRef.current = next;
-    setItems(next);
-  };
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -127,13 +178,14 @@ export function BatchImportDialog({
 
   const parsedPrice = Number(price.replace(",", "."));
   const hasValidPrice = Number.isFinite(parsedPrice) && parsedPrice > 0;
+  const canProceedStep1 = aiPricingActive || hasValidPrice;
 
   const doneCount = items.filter((item) => item.status === "done").length;
   const failedCount = items.filter((item) => item.status === "failed").length;
-  const waitingRetryCount = items.filter((item) => item.status === "retrying_wait").length;
+  const waitingRetryCount = items.filter((item) => item.status === "waiting_retry").length;
   const queuedCount = items.filter((item) => item.status === "queued").length;
-  const finalizedCount = doneCount + failedCount;
-  const progressPercent = items.length > 0 ? Math.round((finalizedCount / items.length) * 100) : 0;
+  const processedCount = doneCount + failedCount;
+  const progressPercent = items.length > 0 ? Math.round((processedCount / items.length) * 100) : 0;
 
   const clearAllItems = () => {
     for (const item of itemsRef.current) {
@@ -153,8 +205,11 @@ export function BatchImportDialog({
     cancelRequestedRef.current = false;
     setStep(1);
     setPrice("");
+    setUseAiPricing(demoPricingEnabled);
+    setSimulatePromo(demoPricingEnabled);
     setSelectedCategory("");
     setSelectedMaterial("");
+    setSelectedSizes([]);
     setAutoPublish(true);
     setConverting(null);
     setIsRunning(false);
@@ -166,12 +221,18 @@ export function BatchImportDialog({
   const handleOpenChange = (nextOpen: boolean) => {
     if (!nextOpen) {
       if (isRunning || converting) {
-        toast.info("Aguarde o término do lote ou pause a fila antes de fechar.");
+        toast.info("Aguarde ou pause a fila antes de fechar.");
         return;
       }
       resetModal();
     }
     onOpenChange(nextOpen);
+  };
+
+  const applyItems = (updater: (prev: BatchItem[]) => BatchItem[]) => {
+    const next = updater(itemsRef.current);
+    itemsRef.current = next;
+    setItems(next);
   };
 
   const handleFilesSelected = async (fileList: FileList | null) => {
@@ -200,7 +261,7 @@ export function BatchImportDialog({
           previewUrl,
           status: "queued",
         };
-        commitItems((prev) => [...prev, nextItem]);
+        applyItems((prev) => [...prev, nextItem]);
         addedCount += 1;
       } catch (err) {
         failedConversions += 1;
@@ -226,7 +287,7 @@ export function BatchImportDialog({
 
   const removeItem = (id: string) => {
     if (isRunning) return;
-    commitItems((prev) => {
+    applyItems((prev) => {
       const target = prev.find((item) => item.id === id);
       if (target) {
         if (target.status !== "done" && target.uploadedImageUrl) {
@@ -240,285 +301,277 @@ export function BatchImportDialog({
   };
 
   const updateItem = (id: string, updater: (item: BatchItem) => BatchItem) => {
-    commitItems((prev) => prev.map((item) => (item.id === id ? updater(item) : item)));
+    applyItems((prev) => prev.map((item) => (item.id === id ? updater(item) : item)));
   };
 
-  const sleepInterruptible = async (totalMs: number): Promise<boolean> => {
-    const stepMs = 200;
-    let elapsed = 0;
-    while (elapsed < totalMs) {
-      if (cancelRequestedRef.current || !mountedRef.current) {
-        return false;
-      }
-      const waitChunk = Math.min(stepMs, totalMs - elapsed);
-      await sleep(waitChunk);
-      elapsed += waitChunk;
-    }
-    return !cancelRequestedRef.current && mountedRef.current;
-  };
+  const runQueue = async (initialTargetIds: string[]) => {
+    if (isRunning || initialTargetIds.length === 0) return;
 
-  const waitWithCountdown = async (
-    totalSeconds: number,
-    round: 2 | 3,
-    pendingFailCount: number,
-  ): Promise<boolean> => {
-    for (let remaining = totalSeconds; remaining > 0; remaining--) {
-      if (cancelRequestedRef.current || !mountedRef.current) {
-        setRetryCountdown(null);
-        return false;
-      }
-      setRetryCountdown({ round, secondsLeft: remaining, failedCount: pendingFailCount });
-      const completedSecond = await sleepInterruptible(1000);
-      if (!completedSecond) {
-        setRetryCountdown(null);
-        return false;
-      }
-    }
-    setRetryCountdown(null);
-    return !cancelRequestedRef.current && mountedRef.current;
-  };
-
-  const processPass = async (
-    targetIds: string[],
-    attempt: number,
-    itemDelayMs: number,
-    defaultCategory: string,
-    defaultMaterial: string,
-  ): Promise<string[]> => {
-    const failedInPass: string[] = [];
-
-    for (let i = 0; i < targetIds.length; i++) {
-      if (cancelRequestedRef.current || !mountedRef.current) break;
-      const itemId = targetIds[i];
-      if (!itemId) continue;
-
-      const currentItem = itemsRef.current.find((item) => item.id === itemId);
-      // Nunca reprocessa nem duplica itens já publicados em passagens anteriores.
-      if (!currentItem || currentItem.status === "done") continue;
-
-      updateItem(itemId, (item) => ({
-        id: item.id,
-        file: item.file,
-        originalName: item.originalName,
-        previewUrl: item.previewUrl,
-        ...(item.uploadedImageUrl ? { uploadedImageUrl: item.uploadedImageUrl } : {}),
-        attempt,
-        status: "analyzing",
-      }));
-
-      let persistedImageUrl = currentItem.uploadedImageUrl ?? "";
-      try {
-        const analysis = await analyzeProductWithAi({
-          file: currentItem.file,
-          availableCategories: categoryNames,
-          availableMaterials: materialNames,
-        });
-
-        if (!mountedRef.current) break;
-
-        const resolvedCategory =
-          selectedCategory ||
-          matchCatalogOption(analysis.category, categoryNames) ||
-          defaultCategory;
-        const resolvedMaterial =
-          selectedMaterial ||
-          matchCatalogOption(analysis.material, materialNames) ||
-          defaultMaterial;
-        const resolvedName = analysis.name.trim() || fallbackProductName(currentItem.originalName);
-        const characteristics = analysis.characteristics.map((row) => ({
-          attribute: row.label,
-          value: row.value,
-        }));
-
-        updateItem(itemId, (item) => ({
-          ...item,
-          attempt,
-          status: "uploading",
-          productName: resolvedName,
-          resolvedCategory,
-          resolvedMaterial,
-        }));
-
-        if (!persistedImageUrl) {
-          const uploaded = await uploadStoreImage(currentItem.file, "products");
-          persistedImageUrl = uploaded.url;
-          if (mountedRef.current) {
-            updateItem(itemId, (item) => ({
-              ...item,
-              uploadedImageUrl: persistedImageUrl,
-            }));
-          }
-        }
-
-        const productToCreate: Product = {
-          id: crypto.randomUUID(),
-          name: resolvedName,
-          sku: "",
-          category: resolvedCategory,
-          material: resolvedMaterial,
-          price: parsedPrice,
-          sale_price: 0,
-          is_on_sale: false,
-          sale_label: "",
-          image_url: persistedImageUrl,
-          description: analysis.description.trim(),
-          active: autoPublish,
-          featured: false,
-          in_stock: true,
-          characteristics,
-        };
-
-        await saveProduct(productToCreate);
-
-        if (!mountedRef.current) break;
-        updateItem(itemId, (item) => ({
-          id: item.id,
-          file: item.file,
-          originalName: item.originalName,
-          previewUrl: item.previewUrl,
-          attempt,
-          status: "done",
-          productName: resolvedName,
-          resolvedCategory,
-          resolvedMaterial,
-        }));
-      } catch (err) {
-        const message =
-          err instanceof Error ? err.message : "Erro inesperado ao importar esta peça.";
-        if (!mountedRef.current) break;
-        updateItem(itemId, (item) => ({
-          ...item,
-          ...(persistedImageUrl ? { uploadedImageUrl: persistedImageUrl } : {}),
-          attempt,
-          status: "failed",
-          error: message,
-        }));
-        failedInPass.push(itemId);
-      }
-
-      if (i < targetIds.length - 1 && !cancelRequestedRef.current && mountedRef.current) {
-        await sleepInterruptible(itemDelayMs);
-      }
-    }
-
-    return failedInPass;
-  };
-
-  const runQueue = async (targetIds: string[]) => {
-    if (isRunning || targetIds.length === 0) return;
-
-    const runnableIds = targetIds.filter((id) => {
+    // Garante que itens já publicados em passagens anteriores nunca sejam duplicados
+    let currentRoundIds = initialTargetIds.filter((id) => {
       const found = itemsRef.current.find((item) => item.id === id);
-      return found && found.status !== "done";
+      return found != null && found.status !== "done";
     });
-    if (runnableIds.length === 0) return;
+    if (currentRoundIds.length === 0) return;
 
     cancelRequestedRef.current = false;
     setIsRunning(true);
     setRetryCountdown(null);
     setCurrentAttempt(1);
 
-    const defaultCategory = categoryNames.includes("Brincos")
-      ? "Brincos"
-      : (categoryNames[0] ?? "Brincos");
-    const defaultMaterial = materialNames.includes("Semijoia")
-      ? "Semijoia"
-      : (materialNames[0] ?? "Semijoia");
+    const defaultCategory = effectiveCategoryNames[0] ?? nicheDefaults.categories[0] ?? "";
+    const defaultMaterial = effectiveMaterialNames[0] ?? nicheDefaults.materials[0] ?? "";
+    const safeScale = Math.max(0, timingScale);
+    const shouldStop = () => cancelRequestedRef.current || !mountedRef.current;
 
-    // Prepara os itens alvo para a 1ª passagem preservando eventual imagem já enviada
-    const targetSet = new Set(runnableIds);
-    commitItems((prev) =>
+    // Reseta os itens alvo para a fila antes da 1ª passagem, preservando uploadedImageUrl se já enviada
+    const initialSet = new Set(currentRoundIds);
+    applyItems((prev) =>
       prev.map((item) =>
-        targetSet.has(item.id)
+        initialSet.has(item.id) && item.status !== "done"
           ? {
-              id: item.id,
-              file: item.file,
-              originalName: item.originalName,
-              previewUrl: item.previewUrl,
-              ...(item.uploadedImageUrl ? { uploadedImageUrl: item.uploadedImageUrl } : {}),
+              ...item,
               status: "queued" as const,
+              attempt: 1,
+              error: undefined,
             }
           : item,
       ),
     );
 
-    // Passagem 1 (normal: 800ms entre itens)
-    let pendingFailures = await processPass(
-      runnableIds,
-      1,
-      BATCH_INITIAL_ITEM_DELAY_MS,
-      defaultCategory,
-      defaultMaterial,
-    );
+    let totalPublishedInRun = 0;
+    let recoveredInRetries = 0;
 
-    // Até 2 rodadas automáticas de repescagem (tentativas 2/3 e 3/3)
     for (const round of BATCH_RETRY_ROUNDS) {
-      if (pendingFailures.length === 0 || cancelRequestedRef.current || !mountedRef.current) {
-        break;
-      }
+      if (shouldStop() || currentRoundIds.length === 0) break;
 
-      const retrySet = new Set(pendingFailures);
-      commitItems((prev) =>
-        prev.map((item) =>
-          retrySet.has(item.id) && item.status !== "done"
-            ? { ...item, status: "retrying_wait" as const }
-            : item,
-        ),
-      );
+      if (round.waitSecondsBeforeRound > 0) {
+        const roundSet = new Set(currentRoundIds);
+        applyItems((prev) =>
+          prev.map((item) =>
+            roundSet.has(item.id) && item.status !== "done"
+              ? {
+                  ...item,
+                  status: "waiting_retry" as const,
+                  attempt: round.attempt,
+                }
+              : item,
+          ),
+        );
 
-      const shouldContinue = await waitWithCountdown(
-        round.waitSeconds,
-        round.attempt,
-        pendingFailures.length,
-      );
-      if (!shouldContinue) {
-        break;
+        const nextAttempt = round.attempt as 2 | 3;
+        for (let secondsLeft = round.waitSecondsBeforeRound; secondsLeft >= 1; secondsLeft--) {
+          if (shouldStop()) break;
+          setRetryCountdown({
+            nextAttempt,
+            maxAttempts: round.maxAttempts,
+            secondsLeft,
+            failedCount: currentRoundIds.length,
+          });
+          await waitInterruptible(1000 * safeScale, shouldStop);
+        }
+
+        if (mountedRef.current) {
+          setRetryCountdown(null);
+        }
+
+        if (shouldStop()) {
+          if (mountedRef.current) {
+            applyItems((prev) =>
+              prev.map((item) =>
+                item.status === "waiting_retry" ? { ...item, status: "failed" as const } : item,
+              ),
+            );
+          }
+          break;
+        }
       }
 
       setCurrentAttempt(round.attempt);
-      pendingFailures = await processPass(
-        pendingFailures,
-        round.attempt,
-        round.itemDelayMs,
-        defaultCategory,
-        defaultMaterial,
-      );
+      const nextRoundFailedIds: string[] = [];
+
+      for (let i = 0; i < currentRoundIds.length; i++) {
+        if (shouldStop()) break;
+        const itemId = currentRoundIds[i];
+        if (!itemId) continue;
+
+        const currentItem = itemsRef.current.find((item) => item.id === itemId);
+        if (!currentItem || currentItem.status === "done") continue;
+
+        updateItem(itemId, (item) => ({
+          ...item,
+          status: "analyzing",
+          attempt: round.attempt,
+          error: undefined,
+        }));
+
+        let uploadedImageUrl = currentItem.uploadedImageUrl ?? "";
+        try {
+          const analysis = await analyzeProductWithAi({
+            file: currentItem.file,
+            availableCategories: effectiveCategoryNames,
+            availableMaterials: effectiveMaterialNames,
+            niche: STORE_CONFIG.niche,
+            estimatePrice: aiPricingActive,
+          });
+
+          if (!mountedRef.current) break;
+
+          const resolvedCategory =
+            selectedCategory ||
+            matchCatalogOption(analysis.category, effectiveCategoryNames) ||
+            defaultCategory;
+          const resolvedMaterial =
+            selectedMaterial ||
+            matchCatalogOption(analysis.material, effectiveMaterialNames) ||
+            defaultMaterial;
+          const resolvedName =
+            analysis.name.trim() || fallbackProductName(currentItem.originalName);
+          const characteristics = analysis.characteristics.map((row) => ({
+            attribute: row.label,
+            value: row.value,
+          }));
+
+          const resolvedPrice = aiPricingActive
+            ? typeof analysis.estimatedPrice === "number" &&
+              Number.isFinite(analysis.estimatedPrice) &&
+              analysis.estimatedPrice > 0
+              ? toCommercialPrice(analysis.estimatedPrice)
+              : hasValidPrice
+                ? toCommercialPrice(parsedPrice)
+                : NICHE_FALLBACK_DEMO_PRICE[STORE_CONFIG.niche]
+            : parsedPrice;
+
+          const batchIndex = itemsRef.current.findIndex((item) => item.id === itemId);
+          const promoPricing = simulatePromoActive
+            ? buildDemoPromoPricing(resolvedPrice, batchIndex >= 0 ? batchIndex : i)
+            : { is_on_sale: false, sale_price: 0, sale_label: "" };
+
+          updateItem(itemId, (item) => ({
+            ...item,
+            status: "uploading",
+            attempt: round.attempt,
+            productName: resolvedName,
+            resolvedCategory,
+            resolvedMaterial,
+            resolvedPrice,
+            resolvedSalePrice: promoPricing.sale_price,
+            resolvedIsOnSale: promoPricing.is_on_sale,
+          }));
+
+          // Faz upload da imagem para o bucket store-media apenas se ainda não tiver sido enviada
+          if (!uploadedImageUrl) {
+            const uploaded = await uploadStoreImage(currentItem.file, "products");
+            uploadedImageUrl = uploaded.url;
+            if (mountedRef.current) {
+              updateItem(itemId, (item) => ({
+                ...item,
+                uploadedImageUrl,
+              }));
+            }
+          }
+
+          const productToCreate: Product = {
+            id: crypto.randomUUID(),
+            name: resolvedName,
+            sku: "",
+            category: resolvedCategory,
+            material: resolvedMaterial,
+            price: resolvedPrice,
+            sale_price: promoPricing.sale_price,
+            is_on_sale: promoPricing.is_on_sale,
+            sale_label: promoPricing.sale_label,
+            image_url: uploadedImageUrl,
+            description: analysis.description.trim(),
+            active: autoPublish,
+            featured: false,
+            in_stock: true,
+            characteristics,
+            sizes: showSizes ? [...selectedSizes] : [],
+          };
+
+          await saveProduct(productToCreate);
+
+          if (!mountedRef.current) break;
+          updateItem(itemId, (item) => ({
+            ...item,
+            status: "done",
+            attempt: round.attempt,
+            uploadedImageUrl,
+            error: undefined,
+            productName: resolvedName,
+            resolvedCategory,
+            resolvedMaterial,
+            resolvedPrice,
+            resolvedSalePrice: promoPricing.sale_price,
+            resolvedIsOnSale: promoPricing.is_on_sale,
+          }));
+          totalPublishedInRun += 1;
+          if (round.attempt > 1) {
+            recoveredInRetries += 1;
+          }
+        } catch (err) {
+          const message =
+            err instanceof Error ? err.message : "Erro inesperado ao importar esta peça.";
+          if (!mountedRef.current) break;
+          updateItem(itemId, (item) => ({
+            ...item,
+            status: "failed",
+            attempt: round.attempt,
+            uploadedImageUrl: uploadedImageUrl || item.uploadedImageUrl,
+            error: message,
+          }));
+          nextRoundFailedIds.push(itemId);
+        }
+
+        if (i < currentRoundIds.length - 1 && !shouldStop()) {
+          await waitInterruptible(round.itemDelayMs * safeScale, shouldStop);
+        }
+      }
+
+      if (shouldStop()) {
+        if (mountedRef.current) {
+          applyItems((prev) =>
+            prev.map((item) =>
+              item.status === "waiting_retry" ? { ...item, status: "failed" as const } : item,
+            ),
+          );
+        }
+        break;
+      }
+
+      currentRoundIds = nextRoundFailedIds;
     }
 
     if (mountedRef.current) {
       setRetryCountdown(null);
-      // Garante que nenhum card fique preso em "Aguardando repescagem..." se a fila foi pausada
-      commitItems((prev) =>
-        prev.some((item) => item.status === "retrying_wait")
-          ? prev.map((item) =>
-              item.status === "retrying_wait" ? { ...item, status: "failed" as const } : item,
-            )
-          : prev,
-      );
-
       setIsRunning(false);
-
-      const totalDone = itemsRef.current.filter((item) => item.status === "done").length;
-      const totalFailed = itemsRef.current.filter((item) => item.status === "failed").length;
+      const remainingFailed = itemsRef.current.filter((item) => item.status === "failed").length;
 
       if (cancelRequestedRef.current) {
-        toast.info("Fila pausada. Você pode continuar ou reprocessar as falhas quando desejar.");
-      } else if (totalFailed === 0 && totalDone > 0) {
-        toast.success(
-          totalDone === 1
-            ? "1 produto importado com sucesso!"
-            : `${totalDone} produtos importados com sucesso!`,
-        );
-      } else if (totalFailed > 0) {
+        toast.info("Fila pausada. Você pode continuar ou reprocessar quando desejar.");
+      } else if (remainingFailed === 0 && totalPublishedInRun > 0) {
+        if (recoveredInRetries > 0) {
+          toast.success(
+            `${totalPublishedInRun} produto(s) importado(s) com sucesso (${recoveredInRetries} recuperado(s) na repescagem automática)!`,
+          );
+        } else {
+          toast.success(
+            totalPublishedInRun === 1
+              ? "1 produto importado com sucesso!"
+              : `${totalPublishedInRun} produtos importados com sucesso!`,
+          );
+        }
+      } else if (remainingFailed > 0) {
         toast.error(
-          `${totalDone} importado(s) e ${totalFailed} com falha após ${BATCH_MAX_ATTEMPTS} tentativas. Use "Reprocessar falhas" se desejar tentar novamente.`,
+          `${totalPublishedInRun} importado(s) e ${remainingFailed} com falha após 3 tentativas. Você pode reprocessar as falhas abaixo.`,
         );
       }
     }
   };
 
   const startBatch = () => {
-    if (!hasValidPrice) {
+    if (!aiPricingActive && !hasValidPrice) {
       toast.error("Informe um preço válido para o lote.");
       setStep(1);
       return;
@@ -555,10 +608,10 @@ export function BatchImportDialog({
             Na fila
           </span>
         );
-      case "retrying_wait":
+      case "waiting_retry":
         return (
-          <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/12 px-2.5 py-1 text-[11px] font-medium text-amber-800">
-            <Clock size={12} />
+          <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2.5 py-1 text-[11px] font-medium text-amber-700">
+            <Clock size={12} className="animate-pulse" />
             Aguardando repescagem...
           </span>
         );
@@ -566,9 +619,7 @@ export function BatchImportDialog({
         return (
           <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary">
             <Loader2 size={12} className="animate-spin" />
-            {item.attempt && item.attempt > 1
-              ? `Analisando (${item.attempt}/${BATCH_MAX_ATTEMPTS})...`
-              : "Analisando..."}
+            {item.attempt && item.attempt > 1 ? `Analisando (${item.attempt}/3)...` : "Analisando..."}
           </span>
         );
       case "uploading":
@@ -594,12 +645,6 @@ export function BatchImportDialog({
         );
     }
   };
-
-  const countdownMessage = retryCountdown
-    ? retryCountdown.round === 2
-      ? `A IA estava ocupada em ${retryCountdown.failedCount} foto(s). Aguardando ${retryCountdown.secondsLeft}s para tentar novamente automaticamente...`
-      : `Aguardando ${retryCountdown.secondsLeft}s para última tentativa automática em ${retryCountdown.failedCount} foto(s)...`
-    : null;
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -643,13 +688,40 @@ export function BatchImportDialog({
         <div className="overflow-y-auto min-h-0 flex-1 space-y-5 pr-1 py-1">
           {step === 1 && (
             <div className="space-y-4">
+              {demoPricingEnabled && (
+                <div className="space-y-2.5 rounded-lg border border-primary/30 bg-primary/5 p-3.5">
+                  <div className="flex items-center gap-2 text-xs font-semibold text-primary">
+                    <Sparkles size={14} className="shrink-0" />
+                    <span>Modo Prévia (Demonstração)</span>
+                  </div>
+                  <label className="flex items-center gap-2.5 text-xs text-foreground cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={useAiPricing}
+                      onChange={(e) => setUseAiPricing(e.target.checked)}
+                    />
+                    Deixar a IA estimar preços realistas por peça (terminados em ,90)
+                  </label>
+                  <label className="flex items-center gap-2.5 text-xs text-foreground cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={simulatePromo}
+                      onChange={(e) => setSimulatePromo(e.target.checked)}
+                    />
+                    Simular etiquetas de promoção em ~25% do lote
+                  </label>
+                </div>
+              )}
+
               <label>
-                Preço único do lote (R$)
+                {aiPricingActive
+                  ? "Preço único do lote (R$ — opcional, usado como fallback)"
+                  : "Preço único do lote (R$)"}
                 <input
                   type="number"
                   min="0"
                   step="0.01"
-                  placeholder="Ex.: 79.90"
+                  placeholder={aiPricingActive ? "Opcional — ex.: 99.90" : "Ex.: 79.90"}
                   value={price}
                   onChange={(e) => setPrice(e.target.value)}
                 />
@@ -663,7 +735,7 @@ export function BatchImportDialog({
                     onChange={(e) => setSelectedCategory(e.target.value)}
                   >
                     <option value="">Deixar a IA identificar por foto</option>
-                    {categoryNames.map((c) => (
+                    {effectiveCategoryNames.map((c) => (
                       <option key={c} value={c}>
                         {c}
                       </option>
@@ -672,13 +744,13 @@ export function BatchImportDialog({
                 </label>
 
                 <label>
-                  Material
+                  {materialLabel}
                   <select
                     value={selectedMaterial}
                     onChange={(e) => setSelectedMaterial(e.target.value)}
                   >
                     <option value="">Deixar a IA identificar por foto</option>
-                    {materialNames.map((m) => (
+                    {effectiveMaterialNames.map((m) => (
                       <option key={m} value={m}>
                         {m}
                       </option>
@@ -686,6 +758,49 @@ export function BatchImportDialog({
                   </select>
                 </label>
               </div>
+
+              {showSizes && (
+                <div className="space-y-2.5 rounded-lg border bg-muted/25 p-3.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs font-medium text-foreground">
+                      Tamanhos do lote (opcional)
+                    </p>
+                    {selectedSizes.length > 0 && (
+                      <button
+                        type="button"
+                        className="text-[11px] font-medium text-muted-foreground hover:text-destructive transition-colors cursor-pointer"
+                        onClick={() => setSelectedSizes([])}
+                      >
+                        Limpar ({selectedSizes.length})
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-2" role="group" aria-label="Tamanhos do lote">
+                    {availableQuickSizes.map((size) => {
+                      const selected = selectedSizes.includes(size);
+                      return (
+                        <button
+                          key={size}
+                          type="button"
+                          aria-pressed={selected}
+                          onClick={() => setSelectedSizes((prev) => toggleQuickSize(prev, size))}
+                          className={`min-h-8 min-w-10 rounded-md border px-3 py-1 text-xs font-medium transition-colors cursor-pointer ${
+                            selected
+                              ? "border-primary bg-primary text-primary-foreground"
+                              : "border-border bg-background text-foreground hover:border-primary/60 hover:text-primary"
+                          }`}
+                        >
+                          {size}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    A mesma grade selecionada será aplicada a todas as peças desta fila. Deixe vazio
+                    para itens sem tamanho.
+                  </p>
+                </div>
+              )}
 
               <label className="flex items-center gap-2.5 rounded-lg border bg-muted/35 px-3.5 py-3 text-xs text-foreground cursor-pointer">
                 <input
@@ -744,7 +859,12 @@ export function BatchImportDialog({
                       {items.length === 1
                         ? "1 foto selecionada"
                         : `${items.length} fotos selecionadas`}{" "}
-                      · {money(parsedPrice)} cada
+                      ·{" "}
+                      {aiPricingActive
+                        ? hasValidPrice
+                          ? `Preços via IA (fallback ${money(toCommercialPrice(parsedPrice))})`
+                          : "Preços estimados via IA"
+                        : `${money(parsedPrice)} cada`}
                     </span>
                     <button
                       type="button"
@@ -793,13 +913,15 @@ export function BatchImportDialog({
           {step === 3 && (
             <div className="space-y-4">
               <div className="rounded-lg border bg-muted/35 p-4 space-y-2.5">
-                <div className="flex items-center justify-between text-xs gap-2">
+                <div className="flex items-center justify-between gap-2 text-xs">
                   <span className="font-medium text-foreground">
-                    {isRunning
-                      ? currentAttempt > 1
-                        ? `Repescagem automática (${currentAttempt}/${BATCH_MAX_ATTEMPTS}) · ${doneCount} de ${items.length} publicados`
-                        : `Processando fila (${finalizedCount} de ${items.length})...`
-                      : `Processamento finalizado (${doneCount} de ${items.length} publicados)`}
+                    {retryCountdown
+                      ? `Repescagem automática (Tentativa ${retryCountdown.nextAttempt}/${retryCountdown.maxAttempts})...`
+                      : isRunning && currentAttempt > 1
+                        ? `Reprocessando automaticamente (Tentativa ${currentAttempt}/3) — ${doneCount} de ${items.length} publicados...`
+                        : isRunning
+                          ? `Processando fila (${processedCount} de ${items.length})...`
+                          : `Processamento finalizado (${doneCount} de ${items.length} publicados)`}
                   </span>
                   <span className="font-semibold text-primary shrink-0">{progressPercent}%</span>
                 </div>
@@ -809,6 +931,16 @@ export function BatchImportDialog({
                     style={{ width: `${progressPercent}%` }}
                   />
                 </div>
+                {retryCountdown && (
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    className="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-800"
+                  >
+                    <Clock size={14} className="shrink-0 animate-pulse" />
+                    <span>{formatRetryCountdownMessage(retryCountdown)}</span>
+                  </div>
+                )}
                 <div className="flex flex-wrap gap-3 text-[11px] text-muted-foreground">
                   <span>Publicados: {doneCount}</span>
                   <span>Falhas: {failedCount}</span>
@@ -816,17 +948,6 @@ export function BatchImportDialog({
                   <span>Na fila: {queuedCount}</span>
                 </div>
               </div>
-
-              {countdownMessage && (
-                <div
-                  role="status"
-                  aria-live="polite"
-                  className="flex items-center gap-2.5 rounded-lg border border-primary/25 bg-primary/8 px-4 py-3 text-xs text-foreground"
-                >
-                  <Loader2 size={15} className="animate-spin text-primary shrink-0" />
-                  <span>{countdownMessage}</span>
-                </div>
-              )}
 
               <div className="divide-y rounded-lg border">
                 {items.map((item) => (
@@ -842,12 +963,23 @@ export function BatchImportDialog({
                       </p>
                       <p className="text-[11px] text-muted-foreground truncate mt-0.5">
                         {item.resolvedCategory && item.resolvedMaterial
-                          ? `${item.resolvedCategory} · ${item.resolvedMaterial} · ${money(parsedPrice)}`
-                          : `${money(parsedPrice)} · ${selectedCategory || "Categoria via IA"} · ${selectedMaterial || "Material via IA"}`}
+                          ? `${item.resolvedCategory} · ${item.resolvedMaterial} · ${
+                              item.resolvedIsOnSale &&
+                              item.resolvedSalePrice &&
+                              item.resolvedPrice
+                                ? `${money(item.resolvedSalePrice)} (de ${money(item.resolvedPrice)})`
+                                : money(item.resolvedPrice ?? parsedPrice)
+                            }${showSizes && selectedSizes.length > 0 ? ` · Tam: ${selectedSizes.join(", ")}` : ""}`
+                          : `${hasValidPrice ? money(parsedPrice) : "Preço via IA"} · ${selectedCategory || "Categoria via IA"} · ${selectedMaterial || `${materialLabel} via IA`}${showSizes && selectedSizes.length > 0 ? ` · Tam: ${selectedSizes.join(", ")}` : ""}`}
                       </p>
                       {item.status === "done" && !autoPublish && (
                         <p className="text-[10px] text-muted-foreground mt-0.5">
                           Salvo como inativo na vitrine
+                        </p>
+                      )}
+                      {item.status === "waiting_retry" && item.error && (
+                        <p className="text-[11px] text-amber-700 mt-1 leading-snug">
+                          Nova tentativa automática agendada...
                         </p>
                       )}
                       {item.status === "failed" && item.error && (
@@ -884,9 +1016,9 @@ export function BatchImportDialog({
               </Button>
               <Button
                 type="button"
-                disabled={!hasValidPrice}
+                disabled={!canProceedStep1}
                 onClick={() => {
-                  if (!hasValidPrice) {
+                  if (!canProceedStep1) {
                     toast.error("Informe um preço válido maior que zero.");
                     return;
                   }
